@@ -1,0 +1,19 @@
+peff_file = "/home/patrick-garrett/Repos/peff_uniprot_fetcher/human.peff"
+output_file = "peptides.csv"
+
+cleave_on = "R"
+missed_cleavages = 0
+semi_enzymatic = false
+max_ptm_per_peptide = 2
+min_length = 4
+max_length = 50
+restrict_after = "P"
+restrict_before = ""
+cterminal = true
+min_mass = 400.0
+max_mass = 10000.0
+drop_invalid_mass = false
+
+
+[variable_mods]
+M = ["Oxidation"]
