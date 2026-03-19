@@ -8,6 +8,7 @@ dependencies = [
     "spxtacular",
     "pefftacular",
     "peff_uniprot_fetcher",
+    "polars>=1.0",
     "pydantic>=2.0",
     "tqdm>=4.67.3",
 ]

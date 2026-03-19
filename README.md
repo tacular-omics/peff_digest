@@ -94,12 +94,34 @@ M = ["Oxidation"]
 
 ## Python API
 
+### Full digest → Polars DataFrame
+
+```python
+from peff_digest import DigestConfig, digest
+
+config = DigestConfig(
+    peff_file="human.peff",
+    missed_cleavages=2,
+    min_length=7,
+    max_length=40,
+    min_mass=400.0,
+    max_mass=10000.0,
+    drop_invalid_mass=True,
+)
+
+df = digest(config)
+print(df)
+```
+
+Returns a `polars.DataFrame` with columns `protein_id`, `sequence`, `variant`, `length`, `mass`. All filtering from the config (mass bounds, `drop_invalid_mass`) is applied before returning.
+
+### Single-entry digest
+
 ```python
 import pefftacular as pf
 from peff_digest import digest_peff_sequence
 
-reader = pf.PeffReader("human.peff")
-entry = next(iter(reader))
+entry = next(iter(pf.PeffReader("human.peff")))
 
 peptides = digest_peff_sequence(
     entry,
@@ -114,10 +136,10 @@ peptides = digest_peff_sequence(
 )
 
 for peptide in peptides:
-    print(peptide, len(peptide), peptide.mass())
+    print(str(peptide), len(peptide), peptide.mass())
 ```
 
-`digest_peff_sequence` returns a `set[peptacular.ProFormaAnnotation]`. Each element supports `len()` for residue count, `.mass()` for monoisotopic mass, and `str()` for the ProForma-annotated sequence string. The `.peptide_name` attribute holds the PEFF variant notation when the peptide derives from a variant, and `None` for canonical peptides.
+Returns a `set[peptacular.ProFormaAnnotation]`. Each element supports `len()`, `.mass()`, `str()`, and `.peptide_name` (PEFF variant notation, or `None` for canonical).
 
 ## Development
 
