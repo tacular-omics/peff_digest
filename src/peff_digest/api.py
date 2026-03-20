@@ -3,29 +3,20 @@ from __future__ import annotations
 import multiprocessing as mp
 from functools import partial
 
-import pefftacular as pf
 import polars as pl
 
-from peff_digest.cli import _digest_worker
+from peff_digest.cli import _digest_worker, read_sequences
 from peff_digest.config import DigestConfig
 
 
 def digest(config: DigestConfig) -> pl.DataFrame:
     """
-    Run a full PEFF digest and return results as a Polars DataFrame.
+    Run a full digest and return results as a Polars DataFrame.
 
     Columns: protein_id (str), sequence (str), variant (str | null),
              length (i64), mass (f64 | null).
     """
-    sequences: list[pf.SequenceEntry] = []
-    reader = iter(pf.PeffReader(config.peff_file))
-    while True:
-        try:
-            sequences.append(next(reader))
-        except StopIteration:
-            break
-        except Exception:
-            pass
+    sequences, _ = read_sequences(config.input_file)
 
     worker = partial(_digest_worker, config=config)
     with mp.Pool(config.workers) as pool:

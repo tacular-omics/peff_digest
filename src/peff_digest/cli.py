@@ -7,6 +7,7 @@ import multiprocessing as mp
 import sys
 import tempfile
 import tomllib
+from collections.abc import Generator
 from functools import partial
 from pathlib import Path
 
@@ -15,15 +16,70 @@ import pydantic
 from tqdm import tqdm
 
 from peff_digest.config import DigestConfig
-from peff_digest.digest import digest_peff_sequence
+from peff_digest.digest import Peptide, digest_peff_sequence
+
+_FASTA_EXTENSIONS = {".fasta", ".fa", ".faa", ".fas"}
 
 
-def _digest_worker(
+def _iter_fasta(path: str):
+    """Yield (header, sequence) pairs from a FASTA file."""
+    header = None
+    chunks: list[str] = []
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip()
+            if line.startswith(">"):
+                if header is not None:
+                    yield header, "".join(chunks)
+                header = line[1:]
+                chunks = []
+            elif header is not None:
+                chunks.append(line)
+    if header is not None:
+        yield header, "".join(chunks)
+
+
+def _fasta_to_entry(header: str, sequence: str) -> pf.SequenceEntry:
+    """Convert a FASTA record to a minimal SequenceEntry."""
+    first_token = header.split()[0]
+    parts = first_token.split("|")
+    if len(parts) >= 3:
+        prefix, db_unique_id = parts[0], parts[1]
+    else:
+        prefix, db_unique_id = "", first_token
+    return pf.SequenceEntry(prefix=prefix, db_unique_id=db_unique_id, sequence=sequence)
+
+
+def read_sequences(path: str) -> tuple[list[pf.SequenceEntry], int]:
+    """Read sequences from a PEFF or FASTA file. Returns (entries, n_malformed)."""
+    sequences: list[pf.SequenceEntry] = []
+    n_malformed = 0
+    if Path(path).suffix.lower() in _FASTA_EXTENSIONS:
+        for header, seq in _iter_fasta(path):
+            try:
+                sequences.append(_fasta_to_entry(header, seq))
+            except Exception:
+                n_malformed += 1
+    else:
+        reader = iter(pf.PeffReader(path))
+        while True:
+            try:
+                sequences.append(next(reader))
+            except StopIteration:
+                break
+            except Exception:
+                n_malformed += 1
+    return sequences, n_malformed
+
+
+def digest_sequence(
     sequence: pf.SequenceEntry,
     config: DigestConfig,
-) -> list[tuple[str, str, str | None, int, float | None]]:
-    protein_id = sequence.db_unique_id
-    peptides = digest_peff_sequence(
+) -> Generator[Peptide, None, None]:
+    """
+    Digest a single PEFF sequence entry and return a set of Peptide objects.
+    """
+    return digest_peff_sequence(
         sequence,
         cleave_on=config.cleave_on,
         missed_cleavages=config.missed_cleavages,
@@ -34,15 +90,25 @@ def _digest_worker(
         restrict_after=config.restrict_after,
         restrict_before=config.restrict_before,
         cterminal=config.cterminal,
-        fixed_mods=config.fixed_mods or None,
-        variable_mods=config.variable_mods or None,
+        internal_mods=config.internal_mods or None,
+        terminal_mods=config.terminal_mods or None,
+        annotate_variants=config.annotate_variants,
     )
+
+
+def _digest_worker(
+    sequence: pf.SequenceEntry,
+    config: DigestConfig,
+) -> list[tuple[str, str, str | None, int, float | None]]:
+    protein_id = sequence.db_unique_id
+    peptides = digest_sequence(sequence, config)
     rows = []
     for peptide in peptides:
-        name = peptide.peptide_name
-        peptide.peptide_name = None
+        ann = peptide.proforma
+        name = ann.peptide_name
+        ann.peptide_name = None
         try:
-            mass = peptide.mass()
+            mass = ann.mass()
         except Exception:
             mass = None
         if mass is None and config.drop_invalid_mass:
@@ -51,7 +117,7 @@ def _digest_worker(
             continue
         if mass is not None and config.max_mass is not None and mass > config.max_mass:
             continue
-        rows.append((protein_id, str(peptide), name, len(peptide), mass))
+        rows.append((protein_id, str(ann), name, len(ann), mass))
     return rows
 
 
@@ -69,10 +135,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="peff-digest",
-        description="Digest a PEFF file and write peptides to CSV.",
+        description="Digest a PEFF or FASTA file and write peptides to CSV.",
     )
     parser.add_argument("--config", metavar="FILE", help="JSON or TOML config file")
-    parser.add_argument("--peff-file", metavar="FILE", help="Input PEFF file")
+    parser.add_argument("--input-file", metavar="FILE", help="Input PEFF or FASTA file")
     parser.add_argument(
         "--output-file", metavar="FILE", default=argparse.SUPPRESS, help="Output CSV file (default: peptides.csv)"
     )
@@ -91,7 +157,19 @@ def main() -> None:
     )
     parser.add_argument("--min-mass", type=float, metavar="DA", default=argparse.SUPPRESS)
     parser.add_argument("--max-mass", type=float, metavar="DA", default=argparse.SUPPRESS)
-    parser.add_argument("--drop-invalid-mass", action="store_true", default=argparse.SUPPRESS, help="Exclude peptides whose mass cannot be computed")
+    parser.add_argument(
+        "--drop-invalid-mass",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Exclude peptides whose mass cannot be computed",
+    )
+    parser.add_argument(
+        "--no-annotate-variants",
+        dest="annotate_variants",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help="Do not set peptide_name on variant peptides",
+    )
     args = parser.parse_args()
 
     # Build config: file first, then CLI overrides
@@ -102,11 +180,10 @@ def main() -> None:
     cli_overrides = {
         k: v for k, v in vars(args).items() if k != "config" and k in DigestConfig.model_fields and v is not None
     }
-    # argparse uses hyphens→underscores automatically, but let's normalise keys
     cli_overrides = {k.replace("-", "_"): v for k, v in cli_overrides.items()}
 
-    if args.peff_file:
-        cli_overrides["peff_file"] = args.peff_file
+    if args.input_file:
+        cli_overrides["input_file"] = args.input_file
 
     try:
         config = DigestConfig(**{**file_data, **cli_overrides})
@@ -116,17 +193,7 @@ def main() -> None:
             print(f"  {loc}: {error['msg']}", file=sys.stderr)
         sys.exit(1)
 
-    # Load sequences
-    sequences: list[pf.SequenceEntry] = []
-    n_malformed = 0
-    reader = iter(pf.PeffReader(config.peff_file))
-    while True:
-        try:
-            sequences.append(next(reader))
-        except StopIteration:
-            break
-        except Exception:
-            n_malformed += 1
+    sequences, n_malformed = read_sequences(config.input_file)
     print(f"{len(sequences)} sequences loaded, {n_malformed} malformed entries skipped")
 
     worker = partial(_digest_worker, config=config)

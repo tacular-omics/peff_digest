@@ -1,4 +1,4 @@
-peff_file = "/home/patrick-garrett/Repos/peff_uniprot_fetcher/human.peff"
+input_file = "tests/data/PEFF_Tiny_Valid.peff"
 output_file = "peptides.csv"
 
 cleave_on = "R"
@@ -15,5 +15,25 @@ max_mass = 10000.0
 drop_invalid_mass = false
 
 
-[variable_mods]
-M = ["Oxidation"]
+# Internal modifications — one [[internal_mods]] block per mod:
+# [[internal_mods]]
+# modification = "Carbamidomethyl"
+# residue = "C"
+# mod_type = "fixed"
+#
+# [[internal_mods]]
+# modification = "Oxidation"
+# residue = "M"
+# mod_type = "variable"
+
+# Terminal modifications — one [[terminal_mods]] block per mod:
+# [[terminal_mods]]
+# modification = "Acetyl"
+# position = "nterm"
+# mod_type = "variable"
+# protein_terminus = true
+#
+# [[terminal_mods]]
+# modification = "Amidated"
+# position = "cterm"
+# mod_type = "variable"

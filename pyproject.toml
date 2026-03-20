@@ -5,9 +5,9 @@ description = "A short description of the project."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "spxtacular",
-    "pefftacular",
-    "peff_uniprot_fetcher",
+    "pefftacular>=0.1.0",
+    "peptacular>=0.1.0",
+    "peff_uniprot_fetcher>=0.1.0",
     "polars>=1.0",
     "pydantic>=2.0",
     "tqdm>=4.67.3",
@@ -55,7 +55,3 @@ select = [
 ]
 
 
-[tool.uv.sources]
-spxtacular = { path = "../spxtacular", editable = true }
-pefftacular = { path = "../pefftacular", editable = true }
-peff_uniprot_fetcher = { path = "../peff_uniprot_fetcher", editable = true }

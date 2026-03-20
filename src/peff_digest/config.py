@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 
+class InternalMod(BaseModel, frozen=True):
+    modification: str
+    residue: str  # one or more AAs (e.g. "C" or "KR") — mod applies to each
+    mod_type: Literal["fixed", "variable"]
+
+
+class TerminalMod(BaseModel, frozen=True):
+    modification: str
+    position: Literal["nterm", "cterm"]
+    mod_type: Literal["fixed", "variable"]
+    residue: str | None = None  # AA that must be at the terminus; None = any
+    protein_terminus: bool = False  # True = only the protein N- or C-terminal peptide
+
+
 class DigestConfig(BaseModel):
-    peff_file: str
+    input_file: str
     output_file: str = "peptides.csv"
     cleave_on: str = "KR"
     missed_cleavages: int = Field(default=2, ge=0)
@@ -17,16 +32,17 @@ class DigestConfig(BaseModel):
     restrict_after: str = "P"
     restrict_before: str = ""
     cterminal: bool = True
-    fixed_mods: dict[str, str] = {"C": "Carbamidomethyl"}
-    variable_mods: dict[str, list[str]] = {"M": ["Oxidation"]}
+    internal_mods: list[InternalMod] = Field(default_factory=list)
+    terminal_mods: list[TerminalMod] = Field(default_factory=list)
     min_mass: float | None = Field(default=None, gt=0)
     max_mass: float | None = Field(default=None, gt=0)
     drop_invalid_mass: bool = False
+    annotate_variants: bool = True
     workers: int | None = Field(default=None, ge=1)
 
-    @field_validator("peff_file")
+    @field_validator("input_file")
     @classmethod
-    def peff_file_must_exist(cls, v: str) -> str:
+    def input_file_must_exist(cls, v: str) -> str:
         if not Path(v).exists():
-            raise ValueError(f"peff_file does not exist: {v}")
+            raise ValueError(f"input_file does not exist: {v}")
         return v
