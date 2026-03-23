@@ -38,6 +38,7 @@ class DigestConfig(BaseModel):
     max_mass: float | None = Field(default=None, gt=0)
     drop_invalid_mass: bool = False
     annotate_variants: bool = True
+    use_mod_names: bool = False
     workers: int | None = Field(default=None, ge=1)
 
     @field_validator("input_file")

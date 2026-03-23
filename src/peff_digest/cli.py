@@ -93,6 +93,7 @@ def digest_sequence(
         internal_mods=config.internal_mods or None,
         terminal_mods=config.terminal_mods or None,
         annotate_variants=config.annotate_variants,
+        use_mod_names=config.use_mod_names,
     )
 
 

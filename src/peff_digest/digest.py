@@ -22,7 +22,6 @@ import peptacular as pt
 from collections.abc import Generator
 from peff_digest.config import InternalMod, TerminalMod
 
-
 def get_cut_sites(
     protein_sequence: str,
     cleave_on: set[str],
@@ -118,6 +117,7 @@ def _mods_in_span(
     span_start: int,  # 0-based in variant.sequence
     span_end: int,  # 0-based exclusive
     mod_entries: list[pf.ModResPsi | pf.ModResUnimod],
+    use_mod_names: bool = False,
 ) -> list[tuple[int, str]]:
     """Return (0-based peptide-local position, ProForma tag) for each PEFF mod in the span."""
     result: list[tuple[int, str]] = []
@@ -132,7 +132,7 @@ def _mods_in_span(
                 continue
             pep_local = local0 - span_start
             if 0 <= pep_local < (span_end - span_start):
-                tag = mod.accession
+                tag = mod.name if use_mod_names else mod.accession
                 result.append((pep_local, tag))
     return result
 
@@ -220,6 +220,7 @@ def digest_peff_sequence(
     internal_mods: list[InternalMod] | None = None,
     terminal_mods: list[TerminalMod] | None = None,
     annotate_variants: bool = True,
+    use_mod_names: bool = False,
 ) -> Generator[Peptide, None, None]:
     """
     Digest a PEFF SequenceEntry and return all peptide variants as ProFormaAnnotations.
@@ -300,7 +301,7 @@ def digest_peff_sequence(
             pep_seq = _vseq[start:end]
 
             # PEFF mods + user variable mods as (0-based peptide position, tag) pairs
-            applicable = _mods_in_span(_variant, start, end, all_mods)
+            applicable = _mods_in_span(_variant, start, end, all_mods, use_mod_names)
             if variable_mods:
                 for aa, tags in variable_mods.items():
                     for i, res in enumerate(pep_seq):
@@ -375,7 +376,9 @@ def digest_peff_sequence(
         # Fully enzymatic peptides
         for i in range(n_cuts - 1):
             for j in range(i + 1, min(i + 2 + missed_cleavages, n_cuts)):
-                yield from _process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False)
+                yield from _process_span(
+                    cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False
+                )
 
         # Semi-enzymatic peptides (one free end)
         if semi_enzymatic:
