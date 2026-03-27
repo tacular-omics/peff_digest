@@ -17,9 +17,11 @@ import itertools
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 
+from collections.abc import Generator
+
 import pefftacular as pf
 import peptacular as pt
-from collections.abc import Generator
+
 from peff_digest.config import InternalMod, TerminalMod
 
 def get_cut_sites(
@@ -221,12 +223,15 @@ def digest_peff_sequence(
     terminal_mods: list[TerminalMod] | None = None,
     annotate_variants: bool = True,
     use_mod_names: bool = False,
+    use_psi_mods: bool = True,
+    include_simple_variants: bool = True,
+    include_complex_variants: bool = True,
 ) -> Generator[Peptide, None, None]:
     """
     Digest a PEFF SequenceEntry and return all peptide variants as ProFormaAnnotations.
 
     Each PEFF VariantSimple / VariantComplex is applied independently (not combined).
-    PEFF PTMs (ModResPsi / ModResUnimod) are applied in combinations of up to
+    PEFF PTMs (ModResPsi) are applied in combinations of up to
     max_ptm_per_peptide per peptide.  Pass 0 to skip PEFF PTMs entirely.
 
     Args:
@@ -264,18 +269,19 @@ def digest_peff_sequence(
             else:
                 variable_mods.setdefault(aa, []).append(m.modification)
 
-    # Collect all PEFF mod annotations (PSI-MOD + Unimod)
-    all_mods: list[pf.ModResPsi | pf.ModResUnimod] = [
-        *peff_entry.mod_res_psi,
-        *peff_entry.mod_res_unimod,
-    ]
+    # Collect all PEFF mod annotations (PSI-MOD)
+    all_mods: list[pf.ModResPsi] = []
+    if use_psi_mods:
+        all_mods.extend(peff_entry.mod_res_psi)
 
     # One variant per PEFF event (canonical + each simple/complex independently)
     variants: list[_Variant] = [_canonical(sequence)]
-    for v in peff_entry.variant_simple:
-        variants.append(_apply_simple(sequence, v))
-    for v in peff_entry.variant_complex:
-        variants.append(_apply_complex(sequence, v))
+    if include_simple_variants:
+        for v in peff_entry.variant_simple:
+            variants.append(_apply_simple(sequence, v))
+    if include_complex_variants:
+        for v in peff_entry.variant_complex:
+            variants.append(_apply_complex(sequence, v))
 
     for variant in variants:
         vseq = variant.sequence

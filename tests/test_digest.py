@@ -24,7 +24,9 @@ def _make_entry(sequence: str, **kwargs) -> pf.SequenceEntry:
 
 def test_get_cut_sites_basic_trypsin():
     # K and R are cleavage sites; P after cut suppresses it
-    cuts = get_cut_sites("PEPTKPEPTIDE", cleave_on={"K", "R"}, restrict_after={"P"}, restrict_before=set(), cterminal=True)
+    cuts = get_cut_sites(
+        "PEPTKPEPTIDE", cleave_on={"K", "R"}, restrict_after={"P"}, restrict_before=set(), cterminal=True
+    )
     # K is at index 4, next char is 'P' → restricted, no cut there
     assert cuts == [0, 12]
 
@@ -225,13 +227,13 @@ def test_variant_complex_substitution() -> None:
 
 
 def test_peff_mod_applied_to_peptide() -> None:
-    # "ACDEFGR": D is at 1-based position 3. ModResUnimod at (3,) with UNIMOD:21.
+    # "ACDEFGR": D is at 1-based position 3. ModResPsi at (3,) with MOD:00696.
     # Digest on R → one span "ACDEFGR". D is at peptide index 2.
-    # max_ptm_per_peptide=1 → unmodified + one with UNIMOD:21 applied.
+    # max_ptm_per_peptide=1 → unmodified + one with MOD:00696 applied.
     entry = _make_entry(
         "ACDEFGR",
-        mod_res_unimod=(
-            pf.ModResUnimod(positions=(3,), accession="UNIMOD:21", name="Phospho"),
+        mod_res_psi=(
+            pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
         ),
     )
     result = digest_peff_sequence(
@@ -242,19 +244,20 @@ def test_peff_mod_applied_to_peptide() -> None:
         min_length=1,
         max_length=40,
         internal_mods=None,
+        use_psi_mods=True,
     )
     result = list(result)
     assert len(result) == 2
     seqs = {str(p.proforma) for p in result}
-    assert any("UNIMOD:21" in s for s in seqs)
+    assert any("MOD:00696" in s for s in seqs)
 
 
 def test_peff_mod_max_ptm_zero_skips_mods() -> None:
     # Same entry as above but max_ptm_per_peptide=0 → only the unmodified peptide.
     entry = _make_entry(
         "ACDEFGR",
-        mod_res_unimod=(
-            pf.ModResUnimod(positions=(3,), accession="UNIMOD:21", name="Phospho"),
+        mod_res_psi=(
+            pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
         ),
     )
     result = digest_peff_sequence(
@@ -359,3 +362,50 @@ def test_digest_fasta_file_no_crash(fasta_path: Path) -> None:
             max_ptm_per_peptide=2,
         )
         assert hasattr(result, "__iter__")
+
+
+# ---------------------------------------------------------------------------
+# Mod source and variant inclusion controls
+# ---------------------------------------------------------------------------
+
+
+def test_psi_mods_excluded_when_disabled() -> None:
+    entry = _make_entry(
+        "ACDEFGR",
+        mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
+    )
+    result = list(digest_peff_sequence(
+        entry, cleave_on="R", missed_cleavages=0, max_ptm_per_peptide=1,
+        min_length=1, max_length=40, use_psi_mods=False,
+    ))
+    seqs = {str(p.proforma) for p in result}
+    assert len(result) == 1
+    assert "ACDEFGR" in seqs
+
+
+def test_no_simple_variants_skips_substituted_peptides() -> None:
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(
+        entry, cleave_on="KR", missed_cleavages=0, max_ptm_per_peptide=0,
+        min_length=1, max_length=40, include_simple_variants=False,
+    ))
+    seqs = {str(p.proforma) for p in result}
+    assert not any("ACAK" in s for s in seqs)
+    assert "AAAK" in seqs
+
+
+def test_no_complex_variants_skips_complex_peptides() -> None:
+    entry = _make_entry(
+        "AABBBKCCR",
+        variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
+    )
+    result = list(digest_peff_sequence(
+        entry, cleave_on="KR", missed_cleavages=0, max_ptm_per_peptide=0,
+        min_length=1, max_length=40, include_complex_variants=False,
+    ))
+    seqs = {str(p.proforma) for p in result}
+    assert not any("AADDK" in s for s in seqs)
+    assert "AABBBK" in seqs

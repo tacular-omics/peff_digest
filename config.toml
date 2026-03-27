@@ -1,8 +1,8 @@
-input_file = "tests/data/PEFF_Tiny_Valid.peff"
+input_file = "/home/patrick-garrett/Repos/peff_uniprot_fetcher/small_human.peff"
 output_file = "peptides.csv"
 
 cleave_on = "R"
-missed_cleavages = 0
+missed_cleavages = 1
 semi_enzymatic = false
 max_ptm_per_peptide = 2
 min_length = 4
@@ -12,7 +12,10 @@ restrict_before = ""
 cterminal = true
 min_mass = 400.0
 max_mass = 10000.0
-drop_invalid_mass = false
+drop_invalid_mass = true
+annotate_variants = true
+use_mod_names = true  # true = use PEFF mod names (e.g. "Phospho"); false = use accessions (e.g. "MOD:00696")
+# workers = 4  # number of parallel workers; omit to use all available cores
 
 
 # Internal modifications — one [[internal_mods]] block per mod:
