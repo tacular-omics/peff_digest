@@ -124,17 +124,6 @@ def _variant_in_span(variant: _Variant, pep_start: int, pep_end: int) -> bool:
     return pep_start < var_end and start0 < pep_end
 
 
-def _variant_name(variant: _Variant, pep_start: int, pep_end: int) -> str | None:
-    """Return a PEFF-notation variant description, or None for canonical / not in span."""
-    if not _variant_in_span(variant, pep_start, pep_end):
-        return None
-    if isinstance(variant.source, pf.VariantSimple):
-        v = variant.source
-        return f"({v.position}|{v.new_amino_acid})"
-    v = variant.source
-    return f"({v.start_pos}|{v.end_pos}|{v.new_sequence})"
-
-
 def _mods_in_span(
     variant: _Variant,
     span_start: int,  # 0-based in variant.sequence
@@ -361,7 +350,6 @@ def digest_peff_sequence(
             variants.append(_apply_complex(sequence, v))
 
     max_ptm_per_peptide = config.max_ptm_per_peptide
-    annotate_variants = config.annotate_variants
     use_mod_names = config.use_mod_names
     semi_enzymatic = config.semi_enzymatic
     missed_cleavages = config.missed_cleavages
@@ -402,7 +390,6 @@ def digest_peff_sequence(
                 fixed_positions = {i for i, res in enumerate(pep_seq) if res in fixed_mods}
                 peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
 
-            name = _variant_name(_variant, start, end)
             span_variant = _variant.source if _variant_in_span(_variant, start, end) else None
             try:
                 peff_variants = _yield_mod_variants(pep_seq, peff_applicable, max_ptm_per_peptide)
@@ -483,8 +470,6 @@ def digest_peff_sequence(
                                 ann.append_nterm_mod(tm.modification)
                             else:
                                 ann.append_cterm_mod(tm.modification)
-                    if annotate_variants and name is not None:
-                        ann.peptide_name = name
                     span_results.append(
                         Peptide(
                             proforma=ann,

@@ -145,6 +145,15 @@ def read_sequences(path: str) -> tuple[list[pf.SequenceEntry], int]:
 # ---------------------------------------------------------------------------
 
 
+def _format_variant(variant: pf.VariantSimple | pf.VariantComplex | None) -> str | None:
+    """Format a variant object as a PEFF-notation string for output."""
+    if variant is None:
+        return None
+    if isinstance(variant, pf.VariantSimple):
+        return f"({variant.position}|{variant.new_amino_acid})"
+    return f"({variant.start_pos}|{variant.end_pos}|{variant.new_sequence})"
+
+
 def _digest_worker(
     sequence: pf.SequenceEntry,
     config: DigestConfig,
@@ -155,8 +164,7 @@ def _digest_worker(
     rows = []
     for peptide in peptides:
         ann = peptide.proforma
-        name = ann.peptide_name
-        ann.peptide_name = None
+        variant_str = _format_variant(peptide.variant)
         if config.use_unimod_output:
             ann = _try_convert_psimod_to_unimod(ann, _get_psi_db(), _get_uni_db())
             if ann is None:
@@ -173,7 +181,7 @@ def _digest_worker(
             continue
         if mass is not None and config.max_mass is not None and mass > config.max_mass:
             continue
-        rows.append((protein_id, str(ann), name, len(ann), mass))
+        rows.append((protein_id, str(ann), variant_str, len(ann), mass))
     return rows
 
 

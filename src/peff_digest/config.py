@@ -39,7 +39,6 @@ class DigestConfig(BaseModel):
     min_mass: float | None = Field(default=None, gt=0)
     max_mass: float | None = Field(default=None, gt=0)
     drop_invalid_mass: bool = False
-    annotate_variants: bool = True
     use_mod_names: bool = False
     use_psi_mods: bool = True
     use_unimod_output: bool = False

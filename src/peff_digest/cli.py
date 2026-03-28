@@ -51,13 +51,6 @@ def main() -> None:
         help="Exclude peptides whose mass cannot be computed",
     )
     parser.add_argument(
-        "--no-annotate-variants",
-        dest="annotate_variants",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Do not set peptide_name on variant peptides",
-    )
-    parser.add_argument(
         "--no-psi-mods",
         dest="use_psi_mods",
         action="store_false",

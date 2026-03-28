@@ -150,7 +150,7 @@ def test_variant_simple_produces_substituted_peptide() -> None:
 
     variant_peptides = [p for p in result if "ACAK" in str(p.proforma) and str(p.proforma) != "AAAK"]
     assert len(variant_peptides) == 1
-    assert variant_peptides[0].proforma.peptide_name is not None
+    assert variant_peptides[0].variant is not None
 
 
 def test_variant_complex_substitution() -> None:
@@ -171,7 +171,7 @@ def test_variant_complex_substitution() -> None:
 
     variant_peptides = [p for p in result if "AADDK" in str(p.proforma) and str(p.proforma) != "AABBBK"]
     assert len(variant_peptides) == 1
-    assert variant_peptides[0].proforma.peptide_name is not None
+    assert variant_peptides[0].variant is not None
 
 
 def test_peff_mod_applied_to_peptide() -> None:
@@ -686,24 +686,6 @@ def test_variant_complex_deletion():
 
 
 # ---------------------------------------------------------------------------
-# annotate_variants=False
-# ---------------------------------------------------------------------------
-
-
-def test_annotate_variants_false_suppresses_peptide_name():
-    """When annotate_variants=False, no peptide should have a peptide_name set."""
-    entry = _make_entry(
-        "AAAKBBBR",
-        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
-    )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", annotate_variants=False),
-    ))
-    assert all(not p.proforma.peptide_name for p in result), \
-        "No peptide should have a non-empty peptide_name when annotate_variants=False"
-
-
-# ---------------------------------------------------------------------------
 # Peptide.mass property
 # ---------------------------------------------------------------------------
 
@@ -817,13 +799,3 @@ def test_variant_field_set_for_complex_variant_in_span():
     assert all(p.variant is None for p in ccr_all)
 
 
-def test_variant_name_not_set_when_peptide_outside_variant():
-    """peptide_name must not carry variant info for peptides that don't overlap the site."""
-    # "AAAKBBBR": variant at position 2. "BBBR" from variant sequence should have no peptide_name.
-    entry = _make_entry(
-        "AAAKBBBR",
-        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
-    )
-    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
-    bbbr = [p for p in result if p.sequence == "BBBR"]
-    assert all(not p.proforma.peptide_name for p in bbbr)
