@@ -8,7 +8,8 @@ import pytest
 
 from peff_digest import DigestConfig, InternalMod, digest_peff_sequence, get_cut_sites
 from peff_digest.config import TerminalMod
-from peff_digest.io import read_sequences
+from peff_digest.digest import _apply_complex, _variant_in_span, ann_to_map
+from peff_digest.io import _digest_batch_worker, _digest_worker, _format_variant, read_sequences
 
 
 @pytest.fixture(scope="session")
@@ -797,5 +798,272 @@ def test_variant_field_set_for_complex_variant_in_span():
     # "CCR" from variant sequence should have variant=None (doesn't overlap)
     ccr_all = [p for p in result if p.sequence == "CCR"]
     assert all(p.variant is None for p in ccr_all)
+
+
+# ---------------------------------------------------------------------------
+# _format_variant (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_format_variant_simple():
+    assert _format_variant(pf.VariantSimple(position=5, new_amino_acid="W")) == "(5|W)"
+
+
+def test_format_variant_complex():
+    v = pf.VariantComplex(start_pos=3, end_pos=7, new_sequence="DDK")
+    assert _format_variant(v) == "(3|7|DDK)"
+
+
+def test_format_variant_deletion():
+    v = pf.VariantComplex(start_pos=2, end_pos=5, new_sequence="")
+    assert _format_variant(v) == "(2|5|)"
+
+
+def test_format_variant_none():
+    assert _format_variant(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _variant_in_span edge cases (digest.py)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_in_span_deletion_overlaps():
+    """Deletion at positions 3-5 (1-based) should be detected in span that contains the site."""
+    # "AABBBKR" with positions 3-5 deleted → "AAKR"
+    # Deletion site is at 0-based start0=2. new_len=0, so var_end=2.
+    # Span [0, 3) → pep_start(0) < var_end(2) AND start0(2) < pep_end(3) → True
+    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert _variant_in_span(v, 0, 3)
+
+
+def test_variant_in_span_deletion_outside():
+    """Deletion should NOT be detected in a span that doesn't contain the site."""
+    # Same deletion at 0-based start0=2. Span [3, 5) → 0 < 2? No → False
+    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert not _variant_in_span(v, 3, 5)
+
+
+def test_variant_in_span_complex_insertion():
+    """Long insertion should properly detect span overlap."""
+    # "AAKR": replace position 2 (1-based, 'A') with "MMMMM"
+    # → variant "AMMMMMKR". Inserted region: [1, 1+5) = [1, 6) in variant coords.
+    v = _apply_complex("AAKR", pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMMM"))
+    assert _variant_in_span(v, 0, 4)   # [0,4) overlaps [1,6)
+    assert not _variant_in_span(v, 0, 1)  # [0,1) does NOT overlap [1,6)
+
+
+def test_variant_in_span_boundary_exact():
+    """Variant at exact span boundary (end-exclusive) should not overlap."""
+    # Simple variant at position 4 (1-based) → 0-based mapped=3
+    # Span [0, 3) should NOT include position 3 (end-exclusive)
+    v = _apply_complex(
+        "AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X")
+    )
+    # Inserted at start0=3, new_len=1, var_end=4. Span [0,3): 0 < 4 AND 3 < 3 → False
+    assert not _variant_in_span(v, 0, 3)
+    # Span [3, 6) should overlap: 3 < 4 AND 3 < 6 → True
+    assert _variant_in_span(v, 3, 6)
+
+
+# ---------------------------------------------------------------------------
+# _digest_worker mass filtering (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_digest_worker_min_mass_filters():
+    """Peptides below min_mass should be excluded."""
+    entry = _make_entry("GR")  # Gly-Arg: very small peptide (~231 Da)
+    config = _cfg(cleave_on="R", min_mass=5000.0)
+    rows = _digest_worker(entry, config)
+    assert len(rows) == 0
+
+
+def test_digest_worker_max_mass_filters():
+    """Peptides above max_mass should be excluded."""
+    entry = _make_entry("ACDEFGHIKLMNPQRSTVWY")  # long, heavy peptide
+    config = _cfg(cleave_on="X", max_mass=100.0)  # X won't cleave, one huge peptide
+    rows = _digest_worker(entry, config)
+    assert len(rows) == 0
+
+
+def test_digest_worker_mass_within_range_kept():
+    """Peptides within mass range should be kept."""
+    entry = _make_entry("ACDEFGR")
+    config = _cfg(cleave_on="R", min_mass=100.0, max_mass=2000.0)
+    rows = _digest_worker(entry, config)
+    assert len(rows) > 0
+    for row in rows:
+        assert row[4] is not None
+        assert 100.0 <= row[4] <= 2000.0
+
+
+def test_digest_worker_variant_column_from_peptide_variant():
+    """The variant column should come from Peptide.variant, not peptide_name."""
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    config = _cfg(cleave_on="KR")
+    rows = _digest_worker(entry, config)
+    # Find the variant row for "ACAK"
+    acak_rows = [r for r in rows if "ACAK" in r[1]]
+    assert len(acak_rows) == 1
+    assert acak_rows[0][2] == "(2|C)"
+    # Canonical rows should have None variant
+    canonical_rows = [r for r in rows if r[2] is None]
+    assert len(canonical_rows) >= 2  # AAAK and BBBR from canonical
+
+
+# ---------------------------------------------------------------------------
+# _digest_batch_worker (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_digest_batch_worker_multiple_sequences():
+    """Batch worker should process multiple sequences and return combined rows."""
+    entries = [_make_entry("AKB"), _make_entry("CKD")]
+    config = _cfg(cleave_on="K")
+    rows = _digest_batch_worker(entries, config)
+    protein_ids = {r[0] for r in rows}
+    assert protein_ids == {"TEST_ID"}  # both have same ID in test helper
+    assert len(rows) >= 4  # at least "AK", "B", "CK", "D"
+
+
+def test_digest_batch_worker_empty_batch():
+    """Empty batch should return no rows."""
+    rows = _digest_batch_worker([], _cfg(cleave_on="K"))
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# DigestConfig serialization (config.py)
+# ---------------------------------------------------------------------------
+
+
+def test_config_round_trip_toml(tmp_path):
+    """DigestConfig should round-trip through TOML serialization."""
+    config = DigestConfig(
+        input_file="", cleave_on="KR", missed_cleavages=2,
+        min_length=5, max_length=30, max_ptm_per_peptide=3,
+    )
+    path = tmp_path / "test.toml"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path)
+    assert loaded.cleave_on == "KR"
+    assert loaded.missed_cleavages == 2
+    assert loaded.min_length == 5
+    assert loaded.max_length == 30
+    assert loaded.max_ptm_per_peptide == 3
+
+
+def test_config_round_trip_json(tmp_path):
+    """DigestConfig should round-trip through JSON serialization."""
+    config = DigestConfig(
+        input_file="", cleave_on="R", missed_cleavages=1,
+        internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+    )
+    path = tmp_path / "test.json"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path)
+    assert loaded.cleave_on == "R"
+    assert loaded.missed_cleavages == 1
+    assert len(loaded.internal_mods) == 1
+    assert loaded.internal_mods[0].modification == "Oxidation"
+
+
+def test_config_from_file_with_overrides(tmp_path):
+    """CLI overrides should take precedence over file values."""
+    config = DigestConfig(input_file="", cleave_on="KR", missed_cleavages=2)
+    path = tmp_path / "test.json"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path, missed_cleavages=5, min_length=10)
+    assert loaded.missed_cleavages == 5
+    assert loaded.min_length == 10
+    assert loaded.cleave_on == "KR"  # from file
+
+
+# ---------------------------------------------------------------------------
+# ann_to_map c-term sentinel
+# ---------------------------------------------------------------------------
+
+
+def test_ann_to_map_cterm_sentinel():
+    """C-terminal mods must map to key -2 in mod_map."""
+    import peptacular as pt
+    ann = pt.parse("AAKR")
+    ann.append_cterm_mod("Amidated")
+    _, mod_map = ann_to_map(ann)
+    assert mod_map.get(-2) == "Amidated"
+
+
+# ---------------------------------------------------------------------------
+# Semi-enzymatic + missed cleavages combined
+# ---------------------------------------------------------------------------
+
+
+def test_semi_enzymatic_with_missed_cleavages():
+    """Semi-enzymatic should work correctly with missed cleavages > 0."""
+    # "AAKBBKCC": cuts at [0, 3, 6, 8]
+    # With missed_cleavages=1 and semi_enzymatic=True:
+    # Fully enzymatic (mc=0): "AAK", "BBK", "CC"
+    # Fully enzymatic (mc=1): "AAKBBK", "BBKCC"
+    # Plus semi-enzymatic spans
+    entry = _make_entry("AAKBBKCC")
+    result = list(digest_peff_sequence(
+        entry, _cfg(cleave_on="K", missed_cleavages=1, semi_enzymatic=True, min_length=2),
+    ))
+    seqs = {p.sequence for p in result}
+    # Fully enzymatic should be present
+    assert "AAK" in seqs
+    assert "BBK" in seqs
+    assert "CC" in seqs
+    assert "AAKBBK" in seqs  # 1 missed
+    assert "BBKCC" in seqs   # 1 missed
+    # Semi-enzymatic examples
+    assert "AA" in seqs   # right-open from pos 0
+    assert "BB" in seqs   # right-open from pos 3
+    semi = [p for p in result if p.semi_enzymatic]
+    assert len(semi) > 0
+
+
+# ---------------------------------------------------------------------------
+# Complex variant insertion (sequence gets longer)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_complex_insertion_longer_sequence():
+    """VariantComplex with new_sequence longer than replaced region."""
+    # "AAKR": replace position 2 (1-based, "A") with "MMMM"
+    # → variant "AMMMMKR" (length 7 vs original 4)
+    entry = _make_entry(
+        "AAKR",
+        variant_complex=(pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMM"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    seqs = {p.sequence for p in result}
+    assert "AAK" in seqs       # canonical
+    assert "AMMMMK" in seqs    # variant (longer)
+    assert "R" in seqs         # both canonical and variant C-term
+
+
+# ---------------------------------------------------------------------------
+# Peptide.variant for deletion that overlaps span
+# ---------------------------------------------------------------------------
+
+
+def test_variant_field_set_for_complex_deletion_in_span():
+    """Peptide.variant should be set for a deletion variant when the span contains the site."""
+    # "AABBBKR": delete positions 3-5 → variant "AAKR"
+    # Variant peptide "AAK" (span [0,3)) contains the deletion site (start0=2).
+    entry = _make_entry(
+        "AABBBKR",
+        variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    aak_variants = [p for p in result if p.sequence == "AAK" and p.variant is not None]
+    assert len(aak_variants) == 1
+    assert isinstance(aak_variants[0].variant, pf.VariantComplex)
+    assert aak_variants[0].variant.new_sequence == ""
 
 
