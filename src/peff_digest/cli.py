@@ -12,13 +12,72 @@ from functools import partial
 from pathlib import Path
 
 import pefftacular as pf
+import peptacular as pt
 import pydantic
+from psimodpy import PsiModDatabase
 from tqdm import tqdm
 
 from peff_digest.config import DigestConfig
-from peff_digest.digest import Peptide, digest_peff_sequence
+from peff_digest.digest import Peptide, _apply_mod, ann_to_map, digest_peff_sequence
 
 logger = logging.getLogger(__name__)
+
+_PSI_DB: PsiModDatabase | None = None
+_UNI_DB = None
+
+
+def _get_psi_db() -> PsiModDatabase:
+    """Load the bundled PSI-MOD database once per process and cache it."""
+    global _PSI_DB
+    if _PSI_DB is None:
+        import psimodpy as _psimodpy
+
+        _PSI_DB = _psimodpy.load()
+    return _PSI_DB
+
+
+def _get_uni_db():
+    """Load the bundled UniMod database once per process and cache it."""
+    global _UNI_DB
+    if _UNI_DB is None:
+        import unimodpy as _unimodpy
+
+        _UNI_DB = _unimodpy.load()
+    return _UNI_DB
+
+
+def _try_convert_psimod_to_unimod(
+    ann: pt.ProFormaAnnotation,
+    psi_db: PsiModDatabase,
+    uni_db,
+) -> pt.ProFormaAnnotation | None:
+    """Replace MOD:NNNNN tags with UNIMOD:N accessions.
+
+    Returns None if any PSI-MOD mod has no UniMod xref — the caller should drop the peptide.
+    Non-PSI-MOD tags (user-added mods) are passed through unchanged.
+    """
+    sequence, mod_map = ann_to_map(ann)
+    new_mod_map: dict[int, str] = {}
+    for pos, tag in mod_map.items():
+        if tag.startswith("MOD:"):
+            psi_entry = psi_db.get_by_id(tag)
+            if psi_entry is None or not psi_entry.xref_unimod:
+                return None
+            try:
+                unimod_id = int(psi_entry.xref_unimod.replace("Unimod:", "").split("#")[0])
+            except ValueError:
+                return None
+            if uni_db.get_by_id(unimod_id) is None:
+                return None
+            new_mod_map[pos] = f"UNIMOD:{unimod_id}"
+        else:
+            new_mod_map[pos] = tag
+    new_ann = pt.parse(sequence)
+    seq_len = len(sequence)
+    for pos, tag in new_mod_map.items():
+        _apply_mod(new_ann, pos, tag, seq_len)
+    return new_ann
+
 
 _FASTA_EXTENSIONS = {".fasta", ".fa", ".faa", ".fas"}
 
@@ -82,6 +141,7 @@ def digest_sequences(
     show_progress: bool = False,
 ) -> Generator[Peptide, None, None]:
     """Digest all sequences in a PEFF/FASTA file, optionally showing a progress bar."""
+    psi_db = _get_psi_db() if config.use_psi_mods else None
     for seq in tqdm(sequences, disable=not show_progress, desc="Digesting", unit="protein"):
         yield from digest_peff_sequence(
             seq,
@@ -101,6 +161,7 @@ def digest_sequences(
             use_psi_mods=config.use_psi_mods,
             include_simple_variants=config.include_simple_variants,
             include_complex_variants=config.include_complex_variants,
+            psi_db=psi_db,
         )
 
 
@@ -111,6 +172,7 @@ def digest_sequence(
     """
     Digest a single PEFF sequence entry and return a set of Peptide objects.
     """
+    psi_db = _get_psi_db() if config.use_psi_mods else None
     return digest_peff_sequence(
         sequence,
         cleave_on=config.cleave_on,
@@ -129,6 +191,7 @@ def digest_sequence(
         use_psi_mods=config.use_psi_mods,
         include_simple_variants=config.include_simple_variants,
         include_complex_variants=config.include_complex_variants,
+        psi_db=psi_db,
     )
 
 
@@ -143,6 +206,10 @@ def _digest_worker(
         ann = peptide.proforma
         name = ann.peptide_name
         ann.peptide_name = None
+        if config.use_unimod_output:
+            ann = _try_convert_psimod_to_unimod(ann, _get_psi_db(), _get_uni_db())
+            if ann is None:
+                continue
         try:
             mass = ann.mass()
         except Exception:
@@ -167,7 +234,6 @@ def _digest_batch_worker(
     for sequence in batch:
         rows.extend(_digest_worker(sequence, config))
     return rows
-
 
 
 def main() -> None:
@@ -222,6 +288,12 @@ def main() -> None:
         help="Do not apply PSI-MOD (ModResPsi) annotations from the PEFF file",
     )
     parser.add_argument(
+        "--use-unimod-output",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Convert PSI-MOD mod tags to UniMod accessions in output; peptides with unmapped mods are dropped",
+    )
+    parser.add_argument(
         "--no-simple-variants",
         dest="include_simple_variants",
         action="store_false",
@@ -264,9 +336,12 @@ def main() -> None:
     logger.info("%d sequences loaded%s", len(sequences), skipped)
 
     batches = list(itertools.batched(sequences, config.batch_size))
+    n_workers = config.workers or mp.cpu_count()
     logger.info(
         "Digesting with %d worker(s), batch size %d (%d batches total)",
-        config.workers, config.batch_size, len(batches),
+        n_workers,
+        config.batch_size,
+        len(batches),
     )
     worker = partial(_digest_batch_worker, config=config)
     with mp.Pool(config.workers) as pool:

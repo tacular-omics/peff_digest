@@ -13,16 +13,18 @@ Skipped: Processed entries (signal peptide / mature-chain trimming).
 
 from __future__ import annotations
 
+import copy
 import itertools
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass
-
 from collections.abc import Generator
+from dataclasses import dataclass
 
 import pefftacular as pf
 import peptacular as pt
+from psimodpy import AminoAcid, PsiModDatabase, TermSpec
 
 from peff_digest.config import InternalMod, TerminalMod
+
 
 def get_cut_sites(
     protein_sequence: str,
@@ -120,8 +122,18 @@ def _mods_in_span(
     span_end: int,  # 0-based exclusive
     mod_entries: list[pf.ModResPsi | pf.ModResUnimod],
     use_mod_names: bool = False,
+    psi_db: PsiModDatabase | None = None,
+    protein_len: int = 0,
 ) -> list[tuple[int, str]]:
-    """Return (0-based peptide-local position, ProForma tag) for each PEFF mod in the span."""
+    """Return (0-based peptide-local position, ProForma tag) for each PEFF mod in the span.
+
+    When *psi_db* is provided each mod is looked up to:
+    - Validate the origin residue against the (possibly variant-mutated) sequence.
+      Mods whose origin does not match the current residue are silently dropped.
+    - Promote terminus-specific mods (TermSpec.N_TERM / C_TERM) to the appropriate
+      terminal sentinel position (_NTERM_POS / _CTERM_POS) when the mod sits at the
+      protein terminus and the peptide spans that terminus.
+    """
     result: list[tuple[int, str]] = []
     for mod in mod_entries:
         for peff_pos in mod.positions:
@@ -133,9 +145,28 @@ def _mods_in_span(
             if local0 is None:
                 continue
             pep_local = local0 - span_start
-            if 0 <= pep_local < (span_end - span_start):
-                tag = mod.name if use_mod_names else mod.accession
-                result.append((pep_local, tag))
+            if not (0 <= pep_local < (span_end - span_start)):
+                continue
+            tag = mod.name if use_mod_names else mod.accession
+
+            if psi_db is not None:
+                entry = psi_db.get_by_id(mod.accession)
+                if entry is not None:
+                    # Validate: origin residue must match the (possibly mutated) residue.
+                    origin = entry.origin
+                    if isinstance(origin, AminoAcid) and origin != AminoAcid.ANY:
+                        if variant.sequence[local0] != str(origin):
+                            continue  # residue changed by variant — drop this mod
+
+                    # Terminal promotion: convert positional mod to terminal sentinel.
+                    if entry.term_spec == TermSpec.N_TERM and local0 == 0 and span_start == 0:
+                        result.append((_NTERM_POS, tag))
+                        continue
+                    if entry.term_spec == TermSpec.C_TERM and local0 == protein_len - 1 and span_end == protein_len:
+                        result.append((_CTERM_POS, tag))
+                        continue
+
+            result.append((pep_local, tag))
     return result
 
 
@@ -183,6 +214,59 @@ def _yield_mod_variants(
     return variants
 
 
+def _count_mods(ann: pt.ProFormaAnnotation) -> int:
+    """Return the total number of modifications on an annotation."""
+    count = 0
+    if ann._nterm_mods:
+        count += sum(ann._nterm_mods.values())
+    if ann._cterm_mods:
+        count += sum(ann._cterm_mods.values())
+    if ann._internal_mods:
+        for mods_dict in ann._internal_mods.values():
+            count += sum(mods_dict.values())
+    return count
+
+
+def _get_occupied_positions(ann: pt.ProFormaAnnotation) -> set[int]:
+    """Return the set of positions (including terminal sentinels) already carrying a mod."""
+    positions: set[int] = set()
+    if ann._nterm_mods:
+        positions.add(_NTERM_POS)
+    if ann._cterm_mods:
+        positions.add(_CTERM_POS)
+    if ann._internal_mods:
+        positions.update(ann._internal_mods.keys())
+    return positions
+
+
+def _yield_user_mod_variants(
+    base_ann: pt.ProFormaAnnotation,
+    user_applicable: list[tuple[int, str]],
+    remaining: int,
+) -> list[pt.ProFormaAnnotation]:
+    """Return annotation variants produced by layering user mods on top of *base_ann*.
+
+    Works like :func:`_yield_mod_variants` but starts from an existing annotation
+    (which may already carry PEFF mods) rather than a bare sequence string.
+    Uses :func:`copy.deepcopy` to avoid mutating the shared base.
+    """
+    variants: list[pt.ProFormaAnnotation] = [copy.deepcopy(base_ann)]
+    if not user_applicable or remaining <= 0:
+        return variants
+
+    seq_len = len(base_ann.stripped_sequence)
+    for n in range(1, min(remaining, len(user_applicable)) + 1):
+        for combo in itertools.combinations(user_applicable, n):
+            positions = [pos for pos, _ in combo]
+            if len(positions) != len(set(positions)):
+                continue  # multiple mods at the same site — skip
+            ann = copy.deepcopy(base_ann)
+            for pos, tag in combo:
+                _apply_mod(ann, pos, tag, seq_len)
+            variants.append(ann)
+    return variants
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -193,6 +277,8 @@ class Peptide:
     proforma: pt.ProFormaAnnotation
     missed_cleavages: int
     semi_enzymatic: bool
+    is_protein_nterm: bool = False
+    is_protein_cterm: bool = False
 
     @property
     def sequence(self) -> str:
@@ -226,6 +312,7 @@ def digest_peff_sequence(
     use_psi_mods: bool = True,
     include_simple_variants: bool = True,
     include_complex_variants: bool = True,
+    psi_db: PsiModDatabase | None = None,
 ) -> Generator[Peptide, None, None]:
     """
     Digest a PEFF SequenceEntry and return all peptide variants as ProFormaAnnotations.
@@ -270,7 +357,7 @@ def digest_peff_sequence(
                 variable_mods.setdefault(aa, []).append(m.modification)
 
     # Collect all PEFF mod annotations (PSI-MOD)
-    all_mods: list[pf.ModResPsi] = []
+    all_mods: list[pf.ModResPsi | pf.ModResUnimod] = []
     if use_psi_mods:
         all_mods.extend(peff_entry.mod_res_psi)
 
@@ -287,9 +374,7 @@ def digest_peff_sequence(
         vseq = variant.sequence
         seq_len = len(vseq)
 
-        cut_sites = get_cut_sites(
-            vseq, cleave_on, restrict_after, restrict_before, cterminal
-        )
+        cut_sites = get_cut_sites(vseq, cleave_on, restrict_after, restrict_before, cterminal)
         n_cuts = len(cut_sites)
 
         def _process_span(
@@ -305,86 +390,119 @@ def digest_peff_sequence(
             if length < _min or length > _max:
                 return []
             pep_seq = _vseq[start:end]
+            is_protein_nterm = start == 0
+            is_protein_cterm = end == _seq_len
 
-            # PEFF mods + user variable mods as (0-based peptide position, tag) pairs
-            applicable = _mods_in_span(_variant, start, end, all_mods, use_mod_names)
+            # ----------------------------------------------------------------
+            # Phase 1: PEFF mods only
+            # When psi_db is provided, _mods_in_span validates each mod against
+            # the (possibly variant-mutated) residue and promotes terminus-specific
+            # mods to terminal sentinels.
+            # ----------------------------------------------------------------
+            peff_applicable = _mods_in_span(_variant, start, end, all_mods, use_mod_names, psi_db, _seq_len)
+
+            # Drop PEFF mods at positions reserved for fixed user mods.
+            if fixed_mods:
+                fixed_positions = {i for i, res in enumerate(pep_seq) if res in fixed_mods}
+                peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
+
+            name = _variant_name(_variant, start, end)
+            try:
+                peff_variants = _yield_mod_variants(pep_seq, peff_applicable, max_ptm_per_peptide)
+            except ValueError:
+                return []  # unparseable sequence (e.g. contains '*' or spaces) — skip span
+
+            # ----------------------------------------------------------------
+            # Build user variable mod candidates once for this span.
+            # These are filtered per-peff-variant below to exclude occupied positions.
+            # ----------------------------------------------------------------
+            user_variable: list[tuple[int, str]] = []
             if variable_mods:
                 for aa, tags in variable_mods.items():
                     for i, res in enumerate(pep_seq):
                         if res == aa:
                             for tag in tags:
-                                applicable.append((i, tag))
+                                user_variable.append((i, tag))
             if terminal_mods:
                 for tm in terminal_mods:
+                    if tm.mod_type != "variable":
+                        continue
                     if tm.position == "nterm":
-                        is_term = (start == 0) if tm.protein_terminus else True
+                        is_term = is_protein_nterm if tm.protein_terminus else True
                         term_aa = pep_seq[0]
                         sentinel = _NTERM_POS
                     else:
-                        is_term = (end == _seq_len) if tm.protein_terminus else True
+                        is_term = is_protein_cterm if tm.protein_terminus else True
                         term_aa = pep_seq[-1]
                         sentinel = _CTERM_POS
                     if not is_term:
                         continue
                     if tm.residue is not None and term_aa not in tm.residue:
                         continue
-                    if tm.mod_type == "variable":
-                        applicable.append((sentinel, tm.modification))
+                    user_variable.append((sentinel, tm.modification))
 
-            # Drop any PEFF/variable mods at positions overridden by a fixed mod
-            if fixed_mods:
-                fixed_positions = {
-                    i for i, res in enumerate(pep_seq) if res in fixed_mods
-                }
-                applicable = [
-                    (pos, tag) for pos, tag in applicable if pos not in fixed_positions
+            # ----------------------------------------------------------------
+            # Phase 2: for each validated PEFF variant, apply user mods.
+            # ----------------------------------------------------------------
+            span_results: list[Peptide] = []
+            for peff_ann in peff_variants:
+                existing = _count_mods(peff_ann)
+                remaining = max_ptm_per_peptide - existing
+                occupied = _get_occupied_positions(peff_ann)
+
+                # Exclude positions already carrying a PEFF mod or reserved by fixed mods.
+                filtered_user = [
+                    (pos, tag)
+                    for pos, tag in user_variable
+                    if pos not in occupied and (not fixed_mods or pos not in fixed_positions)
                 ]
 
-            name = _variant_name(_variant, start, end)
-            try:
-                mod_variants = _yield_mod_variants(
-                    pep_seq, applicable, max_ptm_per_peptide
-                )
-            except ValueError:
-                return []  # unparseable sequence (e.g. contains '*' or spaces) — skip span
-            span_results: list[Peptide] = []
-            for ann in mod_variants:
-                if fixed_mods:
-                    for aa, mod_str in fixed_mods.items():
-                        for i, res in enumerate(pep_seq):
-                            if res == aa:
-                                ann.append_internal_mod_at_index(i, mod_str)
-                if terminal_mods:
-                    for tm in terminal_mods:
-                        if tm.mod_type != "fixed":
-                            continue
-                        if tm.position == "nterm":
-                            is_term = (start == 0) if tm.protein_terminus else True
-                            term_aa = pep_seq[0]
-                        else:
-                            is_term = (end == _seq_len) if tm.protein_terminus else True
-                            term_aa = pep_seq[-1]
-                        if not is_term:
-                            continue
-                        if tm.residue is not None and term_aa not in tm.residue:
-                            continue
-                        if tm.position == "nterm":
-                            ann.append_nterm_mod(tm.modification)
-                        else:
-                            ann.append_cterm_mod(tm.modification)
-                if annotate_variants and name is not None:
-                    ann.peptide_name = name
-                span_results.append(
-                    Peptide(proforma=ann, missed_cleavages=mc, semi_enzymatic=is_semi)
-                )
+                user_variants = _yield_user_mod_variants(peff_ann, filtered_user, remaining)
+
+                for ann in user_variants:
+                    # Apply fixed internal mods unconditionally (positions were excluded
+                    # from PEFF and user variable pools so no double-mod conflict).
+                    if fixed_mods:
+                        for aa, mod_str in fixed_mods.items():
+                            for i, res in enumerate(pep_seq):
+                                if res == aa:
+                                    ann.append_internal_mod_at_index(i, mod_str)
+                    # Apply fixed terminal mods.
+                    if terminal_mods:
+                        for tm in terminal_mods:
+                            if tm.mod_type != "fixed":
+                                continue
+                            if tm.position == "nterm":
+                                is_term = is_protein_nterm if tm.protein_terminus else True
+                                term_aa = pep_seq[0]
+                            else:
+                                is_term = is_protein_cterm if tm.protein_terminus else True
+                                term_aa = pep_seq[-1]
+                            if not is_term:
+                                continue
+                            if tm.residue is not None and term_aa not in tm.residue:
+                                continue
+                            if tm.position == "nterm":
+                                ann.append_nterm_mod(tm.modification)
+                            else:
+                                ann.append_cterm_mod(tm.modification)
+                    if annotate_variants and name is not None:
+                        ann.peptide_name = name
+                    span_results.append(
+                        Peptide(
+                            proforma=ann,
+                            missed_cleavages=mc,
+                            semi_enzymatic=is_semi,
+                            is_protein_nterm=is_protein_nterm,
+                            is_protein_cterm=is_protein_cterm,
+                        )
+                    )
             return span_results
 
         # Fully enzymatic peptides
         for i in range(n_cuts - 1):
             for j in range(i + 1, min(i + 2 + missed_cleavages, n_cuts)):
-                yield from _process_span(
-                    cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False
-                )
+                yield from _process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False)
 
         # Semi-enzymatic peptides (one free end)
         if semi_enzymatic:
@@ -433,14 +551,10 @@ def ann_to_map(ann: pt.ProFormaAnnotation) -> tuple[str, dict[int, str]]:
     if ann._internal_mods is not None:
         for index, mods_dict in ann._internal_mods.items():
             if len(mods_dict) > 1:
-                raise ValueError(
-                    "format does not support multiple modifications at the same site."
-                )
+                raise ValueError("format does not support multiple modifications at the same site.")
             for mod_name, count in mods_dict.items():
                 if count != 1:
-                    raise ValueError(
-                        "format does not support modification multipliers."
-                    )
+                    raise ValueError("format does not support modification multipliers.")
                 mod_map[index] = mod_name
 
     unmod_sequence = ann.stripped_sequence

@@ -12,8 +12,8 @@ dependencies = [
     "pydantic>=2.0",
     "tomli-w>=1.0",
     "tqdm>=4.67.3",
-    "tacular",
     "psimodpy",
+    "unimodpy",
     "uniprotptmpy"
 
 ]
@@ -61,7 +61,3 @@ select = [
 
 
 
-[tool.uv.sources]
-tacular = { path = "../tacular", editable = true }
-psimodpy = { path = "../psimodpy", editable = true }
-uniprotptmpy = { path = "../uniprotptmpy", editable = true }

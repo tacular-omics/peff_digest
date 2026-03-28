@@ -37,7 +37,9 @@ def digest(
     batches = list(itertools.batched(sequences, config.batch_size))
     logger.info(
         "Digesting with %d worker(s), batch size %d (%d batches total)",
-        config.workers, config.batch_size, len(batches),
+        config.workers,
+        config.batch_size,
+        len(batches),
     )
     worker = partial(_digest_batch_worker, config=config)
     with mp.Pool(config.workers) as pool:

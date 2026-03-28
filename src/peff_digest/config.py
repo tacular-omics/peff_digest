@@ -42,6 +42,7 @@ class DigestConfig(BaseModel):
     annotate_variants: bool = True
     use_mod_names: bool = False
     use_psi_mods: bool = True
+    use_unimod_output: bool = False
     include_simple_variants: bool = True
     include_complex_variants: bool = True
     workers: int | None = Field(default=None, ge=1)
