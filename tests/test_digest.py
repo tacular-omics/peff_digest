@@ -6,10 +6,10 @@ import pefftacular as pf
 import psimodpy
 import pytest
 
-from peff_digest import InternalMod, digest_peff_sequence, get_cut_sites
-from peff_digest.cli import read_sequences
+from peff_digest import DigestConfig, InternalMod, digest_peff_sequence, get_cut_sites
 from peff_digest.config import TerminalMod
-from peff_digest.digest import ann_to_map
+from peff_digest.digest import _apply_complex, _variant_in_span, ann_to_map
+from peff_digest.io import _digest_batch_worker, _digest_worker, _format_variant, read_sequences
 
 
 @pytest.fixture(scope="session")
@@ -23,6 +23,12 @@ FASTA_FILES = sorted(DATA_DIR.glob("*.fasta"))
 
 def _make_entry(sequence: str, **kwargs) -> pf.SequenceEntry:
     return pf.SequenceEntry(prefix="sp", db_unique_id="TEST_ID", sequence=sequence, **kwargs)
+
+
+def _cfg(**kwargs) -> DigestConfig:
+    """Create a DigestConfig with test-friendly defaults."""
+    defaults = dict(min_length=1, max_length=40, missed_cleavages=0, max_ptm_per_peptide=0)
+    return DigestConfig(**{**defaults, **kwargs})
 
 
 # ---------------------------------------------------------------------------
@@ -73,22 +79,14 @@ def test_get_cut_sites_restrict_before():
 def test_digest_returns_generator():
     from types import GeneratorType
     entry = _make_entry("ACDEFGHIKLM")
-    result = digest_peff_sequence(entry, cleave_on="K", missed_cleavages=0, max_ptm_per_peptide=0)
+    result = digest_peff_sequence(entry, _cfg(cleave_on="K"))
     assert isinstance(result, GeneratorType)
 
 
 def test_digest_min_length_filters_short_peptides():
     # "AAKBBBBBBBB" → peptides: "AAK" (len 3) and "BBBBBBBB" (len 8)
     entry = _make_entry("AAKBBBBBBBB")
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=5,
-        max_length=40,
-        internal_mods=None,
-    )
+    result = digest_peff_sequence(entry, _cfg(cleave_on="K", min_length=5))
     sequences = {str(p.proforma) for p in result}
     assert "AAK" not in sequences
     assert "BBBBBBBB" in sequences
@@ -96,15 +94,7 @@ def test_digest_min_length_filters_short_peptides():
 
 def test_digest_max_length_filters_long_peptides():
     entry = _make_entry("AAAAAAAAAAAK")  # 11 As + K = 12 chars, one peptide "AAAAAAAAAAAK"
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=5,
-        internal_mods=None,
-    )
+    result = digest_peff_sequence(entry, _cfg(cleave_on="K", max_length=5))
     # The only enzymatic peptide is 12 chars long — should be filtered out
     assert len(list(result)) == 0
 
@@ -112,24 +102,8 @@ def test_digest_max_length_filters_long_peptides():
 def test_digest_missed_cleavages():
     # "AAKBBR" → 0 missed: ["AAK", "BBR"]; 1 missed: also "AAKBBR"
     entry = _make_entry("AAKBBR")
-    result_0 = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
-    result_1 = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=1,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
+    result_0 = digest_peff_sequence(entry, _cfg(cleave_on="KR"))
+    result_1 = digest_peff_sequence(entry, _cfg(cleave_on="KR", missed_cleavages=1))
     seqs_0 = {str(p.proforma) for p in result_0}
     seqs_1 = {str(p.proforma) for p in result_1}
     assert "AAK" in seqs_0
@@ -140,30 +114,15 @@ def test_digest_missed_cleavages():
 
 def test_digest_no_ptms_by_default_returns_unmodified():
     entry = _make_entry("ACDEFGR")
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
+    result = digest_peff_sequence(entry, _cfg(cleave_on="R"))
     seqs = {str(p.proforma) for p in result}
     assert "ACDEFGR" in seqs
 
 
 def test_digest_fixed_mod_applied():
     entry = _make_entry("ACAR")
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
-    )
+    cam = InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")
+    result = digest_peff_sequence(entry, _cfg(cleave_on="R", internal_mods=[cam]))
     seqs = {str(p.proforma) for p in result}
     # The peptide with the fixed mod should be present, unmodified should not
     assert not any(s == "ACAR" for s in seqs)
@@ -183,16 +142,7 @@ def test_variant_simple_produces_substituted_peptide() -> None:
         "AAAKBBBR",
         variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
     )
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
-    result = list(result)
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     seqs = {str(p.proforma) for p in result}
     # Canonical peptide has no variant notation
     assert "AAAK" in seqs
@@ -201,7 +151,7 @@ def test_variant_simple_produces_substituted_peptide() -> None:
 
     variant_peptides = [p for p in result if "ACAK" in str(p.proforma) and str(p.proforma) != "AAAK"]
     assert len(variant_peptides) == 1
-    assert variant_peptides[0].proforma.peptide_name is not None
+    assert variant_peptides[0].variant is not None
 
 
 def test_variant_complex_substitution() -> None:
@@ -213,16 +163,7 @@ def test_variant_complex_substitution() -> None:
         "AABBBKCCR",
         variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
     )
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
-    result = list(result)
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     seqs = {str(p.proforma) for p in result}
     # Canonical peptide has no variant notation
     assert "AABBBK" in seqs
@@ -231,7 +172,7 @@ def test_variant_complex_substitution() -> None:
 
     variant_peptides = [p for p in result if "AADDK" in str(p.proforma) and str(p.proforma) != "AABBBK"]
     assert len(variant_peptides) == 1
-    assert variant_peptides[0].proforma.peptide_name is not None
+    assert variant_peptides[0].variant is not None
 
 
 def test_peff_mod_applied_to_peptide() -> None:
@@ -244,17 +185,7 @@ def test_peff_mod_applied_to_peptide() -> None:
             pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
         ),
     )
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-        use_psi_mods=True,
-    )
-    result = list(result)
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=True)))
     assert len(result) == 2
     seqs = {str(p.proforma) for p in result}
     assert any("MOD:00696" in s for s in seqs)
@@ -268,16 +199,7 @@ def test_peff_mod_max_ptm_zero_skips_mods() -> None:
             pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
         ),
     )
-    result = digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=None,
-    )
-    result = list(result)
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="R")))
     assert len(result) == 1
     seqs = {str(p.proforma) for p in result}
     assert "ACDEFGR" in seqs
@@ -289,13 +211,8 @@ def test_variable_mods_applied() -> None:
     # "AMK" should appear both unmodified and with Oxidation on M.
     entry = _make_entry("AMKR")
     result = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1,
+                     internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")]),
     )
     seqs = {str(p.proforma) for p in result}
     assert "AMK" in seqs
@@ -308,13 +225,8 @@ def test_fixed_mods_applied() -> None:
     # Unmodified "ACK" must not appear.
     entry = _make_entry("ACKR")
     result = digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+        entry, _cfg(cleave_on="KR",
+                     internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")]),
     )
     seqs = {str(p.proforma) for p in result}
     assert "ACK" not in seqs
@@ -339,12 +251,7 @@ def test_digest_peff_file_no_crash(peff_path: Path) -> None:
         except Exception:
             continue  # skip malformed entries
         result = digest_peff_sequence(
-            entry,
-            cleave_on="KR",
-            missed_cleavages=1,
-            min_length=4,
-            max_length=50,
-            max_ptm_per_peptide=2,
+            entry, _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
         )
         assert hasattr(result, "__iter__")
         n_digested += 1
@@ -362,12 +269,7 @@ def test_digest_fasta_file_no_crash(fasta_path: Path) -> None:
     assert len(sequences) > 0
     for entry in sequences:
         result = digest_peff_sequence(
-            entry,
-            cleave_on="KR",
-            missed_cleavages=1,
-            min_length=4,
-            max_length=50,
-            max_ptm_per_peptide=2,
+            entry, _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
         )
         assert hasattr(result, "__iter__")
 
@@ -383,8 +285,7 @@ def test_psi_mods_excluded_when_disabled() -> None:
         mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
     result = list(digest_peff_sequence(
-        entry, cleave_on="R", missed_cleavages=0, max_ptm_per_peptide=1,
-        min_length=1, max_length=40, use_psi_mods=False,
+        entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=False),
     ))
     seqs = {str(p.proforma) for p in result}
     assert len(result) == 1
@@ -397,8 +298,7 @@ def test_no_simple_variants_skips_substituted_peptides() -> None:
         variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
     )
     result = list(digest_peff_sequence(
-        entry, cleave_on="KR", missed_cleavages=0, max_ptm_per_peptide=0,
-        min_length=1, max_length=40, include_simple_variants=False,
+        entry, _cfg(cleave_on="KR", include_simple_variants=False),
     ))
     seqs = {str(p.proforma) for p in result}
     assert not any("ACAK" in s for s in seqs)
@@ -411,8 +311,7 @@ def test_no_complex_variants_skips_complex_peptides() -> None:
         variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
     )
     result = list(digest_peff_sequence(
-        entry, cleave_on="KR", missed_cleavages=0, max_ptm_per_peptide=0,
-        min_length=1, max_length=40, include_complex_variants=False,
+        entry, _cfg(cleave_on="KR", include_complex_variants=False),
     ))
     seqs = {str(p.proforma) for p in result}
     assert not any("AADDK" in s for s in seqs)
@@ -437,14 +336,7 @@ def test_psimod_validation_drops_mod_after_residue_mutation(psi_db) -> None:
         variant_simple=(pf.VariantSimple(position=1, new_amino_acid="W"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
-        include_simple_variants=True,
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
         psi_db=psi_db,
     ))
     # Canonical peptide "SWK" should have a phospho version
@@ -461,14 +353,7 @@ def test_psimod_validation_retains_mod_on_unchanged_residue(psi_db) -> None:
         variant_simple=(pf.VariantSimple(position=1, new_amino_acid="W"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
-        include_simple_variants=True,
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
         psi_db=psi_db,
     ))
     # Both canonical "ASK" and variant "WSK" should have the phospho version
@@ -491,13 +376,7 @@ def test_psimod_terminal_promotion_nterm(psi_db) -> None:
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00050", name="N-acetyl-L-alanine"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
         psi_db=psi_db,
     ))
     seqs = {str(p.proforma) for p in result}
@@ -522,13 +401,7 @@ def test_psimod_terminal_promotion_skipped_for_internal_peptide(psi_db) -> None:
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00050", name="N-acetyl-L-alanine"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
         psi_db=psi_db,
     ))
     r_peptides = [p for p in result if p.sequence == "R"]
@@ -549,14 +422,8 @@ def test_two_phase_delta_user_mods_capped_by_peff_mods(psi_db) -> None:
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00046", name="O-phospho-L-serine"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=2,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
-        internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=2, use_psi_mods=True,
+                     internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")]),
         psi_db=psi_db,
     ))
     smk = [p for p in result if p.sequence == "SMK"]
@@ -576,14 +443,8 @@ def test_two_phase_delta_full_capacity_no_user_mods(psi_db) -> None:
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00046", name="O-phospho-L-serine"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
-        internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True,
+                     internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")]),
         psi_db=psi_db,
     ))
     smk_peptides = [p for p in result if p.sequence == "SMK"]
@@ -600,14 +461,7 @@ def test_two_phase_delta_full_capacity_no_user_mods(psi_db) -> None:
 def test_peptide_protein_terminus_flags() -> None:
     """is_protein_nterm / is_protein_cterm must reflect protein position, not just peptide content."""
     entry = _make_entry("AAKBBR")
-    result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-    ))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     nterm_peptides = [p for p in result if p.is_protein_nterm]
     cterm_peptides = [p for p in result if p.is_protein_cterm]
     assert all(p.sequence == "AAK" for p in nterm_peptides)
@@ -630,14 +484,7 @@ def test_get_cut_sites_consecutive_cleavage_sites():
 def test_digest_consecutive_cleavage_sites_yields_single_aa_peptides():
     # "AKKR" with min_length=1 → "AK", "K", "R"
     entry = _make_entry("AKKR")
-    result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-    ))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     seqs = {str(p.proforma) for p in result}
     assert "AK" in seqs
     assert "K" in seqs
@@ -652,14 +499,7 @@ def test_digest_consecutive_cleavage_sites_yields_single_aa_peptides():
 def test_digest_missed_cleavages_two():
     # "AAKBBRCCQ" → 0 missed: ["AAK","BBR","CCQ"]; 2 missed also includes "AAKBBRCCQ"
     entry = _make_entry("AAKBBRCCQ")
-    result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=2,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-    ))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR", missed_cleavages=2)))
     seqs = {str(p.proforma) for p in result}
     assert "AAK" in seqs
     assert "BBR" in seqs
@@ -681,13 +521,7 @@ def test_semi_enzymatic_right_open():
     # right-open from pos 3: ends 4, 5 → "B" (filtered), "BB"
     entry = _make_entry("AAKBBB")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=2,
-        max_length=40,
-        semi_enzymatic=True,
+        entry, _cfg(cleave_on="K", min_length=2, semi_enzymatic=True),
     ))
     seqs = {str(p.proforma) for p in result}
     # Right-open: starts at enzymatic cut (pos 0 or pos 3), ends at non-cut position
@@ -707,13 +541,7 @@ def test_semi_enzymatic_left_open():
     # end=6: start=5→"B", start=4→"BB", start=3→"BBB" (enzymatic), start=2→"AKBBB"
     entry = _make_entry("AAKBBB")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=2,
-        max_length=40,
-        semi_enzymatic=True,
+        entry, _cfg(cleave_on="K", min_length=2, semi_enzymatic=True),
     ))
     seqs = {str(p.proforma) for p in result}
     assert "AK" in seqs  # left-open, ends at enzymatic cut after K
@@ -725,13 +553,7 @@ def test_semi_enzymatic_includes_fully_enzymatic():
     """Semi-enzymatic mode must still yield fully-enzymatic peptides."""
     entry = _make_entry("AAKBBB")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        semi_enzymatic=True,
+        entry, _cfg(cleave_on="K", semi_enzymatic=True),
     ))
     seqs = {str(p.proforma) for p in result}
     assert "AAK" in seqs
@@ -750,13 +572,8 @@ def test_terminal_mod_fixed_nterm_all_peptides():
     """Fixed nterm mod with protein_terminus=False must appear on every peptide."""
     entry = _make_entry("AAKBBR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")],
+        entry, _cfg(cleave_on="KR",
+                     terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")]),
     ))
     seqs = [str(p.proforma) for p in result]
     assert len(seqs) == 2
@@ -767,13 +584,9 @@ def test_terminal_mod_fixed_nterm_protein_terminus_only():
     """Fixed nterm mod with protein_terminus=True must appear only on the first peptide."""
     entry = _make_entry("AAKBBR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed", protein_terminus=True)],
+        entry, _cfg(cleave_on="KR",
+                     terminal_mods=[TerminalMod(
+                         modification="Acetyl", position="nterm", mod_type="fixed", protein_terminus=True)]),
     ))
     seqs_by_seq = {p.sequence: str(p.proforma) for p in result}
     assert seqs_by_seq["AAK"].startswith("[Acetyl]"), "Protein N-term peptide must have Acetyl"
@@ -784,13 +597,8 @@ def test_terminal_mod_variable_nterm():
     """Variable nterm mod must produce both unmodified and modified forms."""
     entry = _make_entry("AAKBBR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="variable")],
+        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1,
+                     terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="variable")]),
     ))
     aak_peptides = [str(p.proforma) for p in result if p.sequence == "AAK"]
     assert "AAK" in aak_peptides, "Unmodified form must be present"
@@ -802,13 +610,9 @@ def test_terminal_mod_fixed_nterm_residue_filter():
     # "AAKBBR": "AAK" starts with A → gets mod; "BBR" starts with B → no mod
     entry = _make_entry("AAKBBR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed", residue="A")],
+        entry, _cfg(cleave_on="KR",
+                     terminal_mods=[TerminalMod(
+                         modification="Acetyl", position="nterm", mod_type="fixed", residue="A")]),
     ))
     seqs_by_seq = {p.sequence: str(p.proforma) for p in result}
     assert seqs_by_seq["AAK"].startswith("[Acetyl]"), "AAK starts with A, must have Acetyl"
@@ -827,14 +631,7 @@ def test_use_mod_names_outputs_name_instead_of_accession():
         mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
-        use_mod_names=True,
+        entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=True, use_mod_names=True),
     ))
     seqs = {str(p.proforma) for p in result}
     assert any("phosphorylated residue" in s for s in seqs), "Mod name must appear in output"
@@ -856,13 +653,7 @@ def test_psimod_terminal_promotion_cterm(psi_db) -> None:
         mod_res_psi=(pf.ModResPsi(positions=(5,), accession="MOD:00090", name="L-alanine amide"),),
     )
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="K",
-        missed_cleavages=0,
-        max_ptm_per_peptide=1,
-        min_length=1,
-        max_length=40,
-        use_psi_mods=True,
+        entry, _cfg(cleave_on="K", max_ptm_per_peptide=1, use_psi_mods=True),
         psi_db=psi_db,
     ))
     seqs = {str(p.proforma) for p in result}
@@ -889,41 +680,10 @@ def test_variant_complex_deletion():
         "AABBBKR",
         variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""),),
     )
-    result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-    ))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     seqs = {str(p.proforma) for p in result}
     assert "AABBBK" in seqs, "Canonical peptide must still be present"
     assert any("AAK" in s for s in seqs), "Deletion variant must produce shorter peptide"
-
-
-# ---------------------------------------------------------------------------
-# annotate_variants=False
-# ---------------------------------------------------------------------------
-
-
-def test_annotate_variants_false_suppresses_peptide_name():
-    """When annotate_variants=False, no peptide should have a peptide_name set."""
-    entry = _make_entry(
-        "AAAKBBBR",
-        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
-    )
-    result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        annotate_variants=False,
-    ))
-    assert all(not p.proforma.peptide_name for p in result), \
-        "No peptide should have a non-empty peptide_name when annotate_variants=False"
 
 
 # ---------------------------------------------------------------------------
@@ -935,13 +695,8 @@ def test_peptide_mass_returns_positive_float():
     """Peptide.mass must return a positive float for all digested peptides."""
     entry = _make_entry("ACDEFGR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="R",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+        entry, _cfg(cleave_on="R",
+                     internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")]),
     ))
     assert len(result) > 0
     for p in result:
@@ -959,13 +714,8 @@ def test_ann_to_map_internal_mod():
     """ann_to_map must return the correct position→name mapping for an internal mod."""
     entry = _make_entry("ACKR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+        entry, _cfg(cleave_on="KR",
+                     internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")]),
     ))
     ack_peptides = [p for p in result if p.sequence == "ACK"]
     assert len(ack_peptides) == 1
@@ -978,13 +728,342 @@ def test_ann_to_map_nterm_sentinel():
     """N-terminal mods must map to key -1 in mod_map."""
     entry = _make_entry("AAKR")
     result = list(digest_peff_sequence(
-        entry,
-        cleave_on="KR",
-        missed_cleavages=0,
-        max_ptm_per_peptide=0,
-        min_length=1,
-        max_length=40,
-        terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")],
+        entry, _cfg(cleave_on="KR",
+                     terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")]),
     ))
     aak = next(p for p in result if p.sequence == "AAK")
     assert aak.mod_map.get(-1) == "Acetyl", f"Expected -1: Acetyl in mod_map, got {aak.mod_map}"
+
+
+# ---------------------------------------------------------------------------
+# Peptide.variant: only set when peptide span contains the variant
+# ---------------------------------------------------------------------------
+
+
+def test_variant_field_set_when_peptide_contains_simple_variant():
+    """Peptide.variant must be set when the span contains the VariantSimple site."""
+    # "AAAKBBBR": variant at position 2 (A→C). Digest → "AAAK" contains pos 2, "BBBR" does not.
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    # Variant peptide "ACAK" should have .variant set
+    acak = [p for p in result if p.sequence == "ACAK"]
+    assert len(acak) == 1
+    assert acak[0].variant is not None
+    assert isinstance(acak[0].variant, pf.VariantSimple)
+    assert acak[0].variant.position == 2
+
+
+def test_variant_field_none_when_peptide_does_not_contain_simple_variant():
+    """Peptide.variant must be None for peptides from a variant sequence that don't overlap the site."""
+    # "AAAKBBBR": variant at position 2 (A→C). "BBBR" does not contain pos 2.
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    # "BBBR" peptides from variant sequence should have variant=None
+    bbbr_from_variant = [p for p in result if p.sequence == "BBBR"]
+    assert all(p.variant is None for p in bbbr_from_variant)
+
+
+def test_variant_field_none_for_canonical_peptides():
+    """Peptide.variant must be None for all canonical peptides."""
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    canonical = [p for p in result if p.sequence in ("AAAK", "BBBR") and p.variant is None]
+    # There should be canonical "AAAK" and "BBBR" with no variant
+    assert any(p.sequence == "AAAK" for p in canonical)
+    assert any(p.sequence == "BBBR" for p in canonical)
+
+
+def test_variant_field_set_for_complex_variant_in_span():
+    """Peptide.variant must be set for complex variants when the span overlaps."""
+    # "AABBBKCCR": positions 3-5 replaced with "DD" → variant "AADDKCCR"
+    # "AADDK" overlaps the variant site, "CCR" does not.
+    entry = _make_entry(
+        "AABBBKCCR",
+        variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    aaddk = [p for p in result if p.sequence == "AADDK"]
+    assert len(aaddk) == 1
+    assert aaddk[0].variant is not None
+    assert isinstance(aaddk[0].variant, pf.VariantComplex)
+    # "CCR" from variant sequence should have variant=None (doesn't overlap)
+    ccr_all = [p for p in result if p.sequence == "CCR"]
+    assert all(p.variant is None for p in ccr_all)
+
+
+# ---------------------------------------------------------------------------
+# _format_variant (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_format_variant_simple():
+    assert _format_variant(pf.VariantSimple(position=5, new_amino_acid="W")) == "(5|W)"
+
+
+def test_format_variant_complex():
+    v = pf.VariantComplex(start_pos=3, end_pos=7, new_sequence="DDK")
+    assert _format_variant(v) == "(3|7|DDK)"
+
+
+def test_format_variant_deletion():
+    v = pf.VariantComplex(start_pos=2, end_pos=5, new_sequence="")
+    assert _format_variant(v) == "(2|5|)"
+
+
+def test_format_variant_none():
+    assert _format_variant(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _variant_in_span edge cases (digest.py)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_in_span_deletion_overlaps():
+    """Deletion at positions 3-5 (1-based) should be detected in span that contains the site."""
+    # "AABBBKR" with positions 3-5 deleted → "AAKR"
+    # Deletion site is at 0-based start0=2. new_len=0, so var_end=2.
+    # Span [0, 3) → pep_start(0) < var_end(2) AND start0(2) < pep_end(3) → True
+    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert _variant_in_span(v, 0, 3)
+
+
+def test_variant_in_span_deletion_outside():
+    """Deletion should NOT be detected in a span that doesn't contain the site."""
+    # Same deletion at 0-based start0=2. Span [3, 5) → 0 < 2? No → False
+    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert not _variant_in_span(v, 3, 5)
+
+
+def test_variant_in_span_complex_insertion():
+    """Long insertion should properly detect span overlap."""
+    # "AAKR": replace position 2 (1-based, 'A') with "MMMMM"
+    # → variant "AMMMMMKR". Inserted region: [1, 1+5) = [1, 6) in variant coords.
+    v = _apply_complex("AAKR", pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMMM"))
+    assert _variant_in_span(v, 0, 4)   # [0,4) overlaps [1,6)
+    assert not _variant_in_span(v, 0, 1)  # [0,1) does NOT overlap [1,6)
+
+
+def test_variant_in_span_boundary_exact():
+    """Variant at exact span boundary (end-exclusive) should not overlap."""
+    # Simple variant at position 4 (1-based) → 0-based mapped=3
+    # Span [0, 3) should NOT include position 3 (end-exclusive)
+    v = _apply_complex(
+        "AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X")
+    )
+    # Inserted at start0=3, new_len=1, var_end=4. Span [0,3): 0 < 4 AND 3 < 3 → False
+    assert not _variant_in_span(v, 0, 3)
+    # Span [3, 6) should overlap: 3 < 4 AND 3 < 6 → True
+    assert _variant_in_span(v, 3, 6)
+
+
+# ---------------------------------------------------------------------------
+# _digest_worker mass filtering (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_digest_worker_min_mass_filters():
+    """Peptides below min_mass should be excluded."""
+    entry = _make_entry("GR")  # Gly-Arg: very small peptide (~231 Da)
+    config = _cfg(cleave_on="R", min_mass=5000.0)
+    rows = _digest_worker(entry, config)
+    assert len(rows) == 0
+
+
+def test_digest_worker_max_mass_filters():
+    """Peptides above max_mass should be excluded."""
+    entry = _make_entry("ACDEFGHIKLMNPQRSTVWY")  # long, heavy peptide
+    config = _cfg(cleave_on="X", max_mass=100.0)  # X won't cleave, one huge peptide
+    rows = _digest_worker(entry, config)
+    assert len(rows) == 0
+
+
+def test_digest_worker_mass_within_range_kept():
+    """Peptides within mass range should be kept."""
+    entry = _make_entry("ACDEFGR")
+    config = _cfg(cleave_on="R", min_mass=100.0, max_mass=2000.0)
+    rows = _digest_worker(entry, config)
+    assert len(rows) > 0
+    for row in rows:
+        assert row[4] is not None
+        assert 100.0 <= row[4] <= 2000.0
+
+
+def test_digest_worker_variant_column_from_peptide_variant():
+    """The variant column should come from Peptide.variant, not peptide_name."""
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    config = _cfg(cleave_on="KR")
+    rows = _digest_worker(entry, config)
+    # Find the variant row for "ACAK"
+    acak_rows = [r for r in rows if "ACAK" in r[1]]
+    assert len(acak_rows) == 1
+    assert acak_rows[0][2] == "(2|C)"
+    # Canonical rows should have None variant
+    canonical_rows = [r for r in rows if r[2] is None]
+    assert len(canonical_rows) >= 2  # AAAK and BBBR from canonical
+
+
+# ---------------------------------------------------------------------------
+# _digest_batch_worker (io.py)
+# ---------------------------------------------------------------------------
+
+
+def test_digest_batch_worker_multiple_sequences():
+    """Batch worker should process multiple sequences and return combined rows."""
+    entries = [_make_entry("AKB"), _make_entry("CKD")]
+    config = _cfg(cleave_on="K")
+    rows = _digest_batch_worker(entries, config)
+    protein_ids = {r[0] for r in rows}
+    assert protein_ids == {"TEST_ID"}  # both have same ID in test helper
+    assert len(rows) >= 4  # at least "AK", "B", "CK", "D"
+
+
+def test_digest_batch_worker_empty_batch():
+    """Empty batch should return no rows."""
+    rows = _digest_batch_worker([], _cfg(cleave_on="K"))
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# DigestConfig serialization (config.py)
+# ---------------------------------------------------------------------------
+
+
+def test_config_round_trip_toml(tmp_path):
+    """DigestConfig should round-trip through TOML serialization."""
+    config = DigestConfig(
+        input_file="", cleave_on="KR", missed_cleavages=2,
+        min_length=5, max_length=30, max_ptm_per_peptide=3,
+    )
+    path = tmp_path / "test.toml"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path)
+    assert loaded.cleave_on == "KR"
+    assert loaded.missed_cleavages == 2
+    assert loaded.min_length == 5
+    assert loaded.max_length == 30
+    assert loaded.max_ptm_per_peptide == 3
+
+
+def test_config_round_trip_json(tmp_path):
+    """DigestConfig should round-trip through JSON serialization."""
+    config = DigestConfig(
+        input_file="", cleave_on="R", missed_cleavages=1,
+        internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+    )
+    path = tmp_path / "test.json"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path)
+    assert loaded.cleave_on == "R"
+    assert loaded.missed_cleavages == 1
+    assert len(loaded.internal_mods) == 1
+    assert loaded.internal_mods[0].modification == "Oxidation"
+
+
+def test_config_from_file_with_overrides(tmp_path):
+    """CLI overrides should take precedence over file values."""
+    config = DigestConfig(input_file="", cleave_on="KR", missed_cleavages=2)
+    path = tmp_path / "test.json"
+    config.to_file(path)
+    loaded = DigestConfig.from_file(path, missed_cleavages=5, min_length=10)
+    assert loaded.missed_cleavages == 5
+    assert loaded.min_length == 10
+    assert loaded.cleave_on == "KR"  # from file
+
+
+# ---------------------------------------------------------------------------
+# ann_to_map c-term sentinel
+# ---------------------------------------------------------------------------
+
+
+def test_ann_to_map_cterm_sentinel():
+    """C-terminal mods must map to key -2 in mod_map."""
+    import peptacular as pt
+    ann = pt.parse("AAKR")
+    ann.append_cterm_mod("Amidated")
+    _, mod_map = ann_to_map(ann)
+    assert mod_map.get(-2) == "Amidated"
+
+
+# ---------------------------------------------------------------------------
+# Semi-enzymatic + missed cleavages combined
+# ---------------------------------------------------------------------------
+
+
+def test_semi_enzymatic_with_missed_cleavages():
+    """Semi-enzymatic should work correctly with missed cleavages > 0."""
+    # "AAKBBKCC": cuts at [0, 3, 6, 8]
+    # With missed_cleavages=1 and semi_enzymatic=True:
+    # Fully enzymatic (mc=0): "AAK", "BBK", "CC"
+    # Fully enzymatic (mc=1): "AAKBBK", "BBKCC"
+    # Plus semi-enzymatic spans
+    entry = _make_entry("AAKBBKCC")
+    result = list(digest_peff_sequence(
+        entry, _cfg(cleave_on="K", missed_cleavages=1, semi_enzymatic=True, min_length=2),
+    ))
+    seqs = {p.sequence for p in result}
+    # Fully enzymatic should be present
+    assert "AAK" in seqs
+    assert "BBK" in seqs
+    assert "CC" in seqs
+    assert "AAKBBK" in seqs  # 1 missed
+    assert "BBKCC" in seqs   # 1 missed
+    # Semi-enzymatic examples
+    assert "AA" in seqs   # right-open from pos 0
+    assert "BB" in seqs   # right-open from pos 3
+    semi = [p for p in result if p.semi_enzymatic]
+    assert len(semi) > 0
+
+
+# ---------------------------------------------------------------------------
+# Complex variant insertion (sequence gets longer)
+# ---------------------------------------------------------------------------
+
+
+def test_variant_complex_insertion_longer_sequence():
+    """VariantComplex with new_sequence longer than replaced region."""
+    # "AAKR": replace position 2 (1-based, "A") with "MMMM"
+    # → variant "AMMMMKR" (length 7 vs original 4)
+    entry = _make_entry(
+        "AAKR",
+        variant_complex=(pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMM"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    seqs = {p.sequence for p in result}
+    assert "AAK" in seqs       # canonical
+    assert "AMMMMK" in seqs    # variant (longer)
+    assert "R" in seqs         # both canonical and variant C-term
+
+
+# ---------------------------------------------------------------------------
+# Peptide.variant for deletion that overlaps span
+# ---------------------------------------------------------------------------
+
+
+def test_variant_field_set_for_complex_deletion_in_span():
+    """Peptide.variant should be set for a deletion variant when the span contains the site."""
+    # "AABBBKR": delete positions 3-5 → variant "AAKR"
+    # Variant peptide "AAK" (span [0,3)) contains the deletion site (start0=2).
+    entry = _make_entry(
+        "AABBBKR",
+        variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    aak_variants = [p for p in result if p.sequence == "AAK" and p.variant is not None]
+    assert len(aak_variants) == 1
+    assert isinstance(aak_variants[0].variant, pf.VariantComplex)
+    assert aak_variants[0].variant.new_sequence == ""
+
+

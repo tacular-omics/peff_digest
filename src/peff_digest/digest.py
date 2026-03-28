@@ -23,7 +23,7 @@ import pefftacular as pf
 import peptacular as pt
 from psimodpy import AminoAcid, PsiModDatabase, TermSpec
 
-from peff_digest.config import InternalMod, TerminalMod
+from peff_digest.config import DigestConfig
 
 
 def get_cut_sites(
@@ -105,15 +105,23 @@ def _apply_complex(sequence: str, v: pf.VariantComplex) -> _Variant:
     return _Variant(new_seq, pos_map, source=v, source_orig=orig_seq)
 
 
-def _variant_name(variant: _Variant, pep_start: int, pep_end: int) -> str | None:
-    """Return a PEFF-notation variant description, or None for canonical."""
+def _variant_in_span(variant: _Variant, pep_start: int, pep_end: int) -> bool:
+    """Return True if the variant's mutation site overlaps the peptide span [pep_start, pep_end)."""
     if variant.source is None:
-        return None
+        return False
     if isinstance(variant.source, pf.VariantSimple):
-        v = variant.source
-        return f"({v.position}|{v.new_amino_acid})"
+        mapped = variant.pos_map.get(int(variant.source.position))
+        if mapped is None:
+            return False
+        return pep_start <= mapped < pep_end
+    # VariantComplex: the new sequence occupies [start0, start0+len(new_sequence))
     v = variant.source
-    return f"({v.start_pos}|{v.end_pos}|{v.new_sequence})"
+    start0 = int(v.start_pos) - 1
+    new_len = len(v.new_sequence)
+    # After complex variant, the inserted region sits at [start0, start0+new_len)
+    # in the variant sequence. Check overlap with peptide span.
+    var_end = start0 + new_len
+    return pep_start < var_end and start0 < pep_end
 
 
 def _mods_in_span(
@@ -279,6 +287,7 @@ class Peptide:
     semi_enzymatic: bool
     is_protein_nterm: bool = False
     is_protein_cterm: bool = False
+    variant: pf.VariantSimple | pf.VariantComplex | None = None
 
     @property
     def sequence(self) -> str:
@@ -296,60 +305,30 @@ class Peptide:
 
 def digest_peff_sequence(
     peff_entry: pf.SequenceEntry,
-    cleave_on: str,
-    min_length: int | None = None,
-    max_length: int | None = None,
-    restrict_after: str = "",
-    restrict_before: str = "",
-    cterminal: bool = True,
-    missed_cleavages: int = 0,
-    semi_enzymatic: bool = False,
-    max_ptm_per_peptide: int = 2,
-    internal_mods: list[InternalMod] | None = None,
-    terminal_mods: list[TerminalMod] | None = None,
-    annotate_variants: bool = True,
-    use_mod_names: bool = False,
-    use_psi_mods: bool = True,
-    include_simple_variants: bool = True,
-    include_complex_variants: bool = True,
+    config: DigestConfig,
     psi_db: PsiModDatabase | None = None,
 ) -> Generator[Peptide, None, None]:
     """
-    Digest a PEFF SequenceEntry and return all peptide variants as ProFormaAnnotations.
+    Digest a PEFF SequenceEntry and return all peptide variants as Peptide objects.
 
     Each PEFF VariantSimple / VariantComplex is applied independently (not combined).
     PEFF PTMs (ModResPsi) are applied in combinations of up to
-    max_ptm_per_peptide per peptide.  Pass 0 to skip PEFF PTMs entirely.
-
-    Args:
-        peff_entry:          Parsed PEFF SequenceEntry.
-        cleave_on:           Set of amino acids to cleave on (e.g. {"K", "R"}).
-        min_length:          Minimum peptide length (inclusive), or None.
-        max_length:          Maximum peptide length (inclusive), or None.
-        restrict_after:      Do not cleave when the next AA is in this set.
-        restrict_before:     Do not cleave when the preceding AA is in this set.
-        cterminal:           True = C-terminal cleavage (standard); False = N-terminal.
-        missed_cleavages:    Maximum number of missed cleavage sites allowed.
-        semi_enzymatic:      Include semi-enzymatic peptides (one non-enzymatic end).
-        max_ptm_per_peptide: Max number of PEFF PTM annotations to apply simultaneously.
-        internal_mods:       Per-residue modifications. Each InternalMod specifies a
-                             residue string, modification name, and mod_type ("fixed"
-                             or "variable").
-
-    Returns:
-        Set of unique ProFormaAnnotation objects.
+    ``config.max_ptm_per_peptide`` per peptide.  Pass 0 to skip PEFF PTMs entirely.
     """
     sequence = peff_entry.sequence
-    _min = min_length if min_length is not None else 0
-    _max = max_length if max_length is not None else len(sequence)
+    _min = config.min_length if config.min_length is not None else 0
+    _max = config.max_length if config.max_length is not None else len(sequence)
 
-    restrict_after: set[str] = set(restrict_after)
-    restrict_before: set[str] = set(restrict_before)
-    cleave_on: set[str] = set(cleave_on)
+    restrict_after: set[str] = set(config.restrict_after)
+    restrict_before: set[str] = set(config.restrict_before)
+    cleave_on: set[str] = set(config.cleave_on)
+
+    internal_mods = config.internal_mods or []
+    terminal_mods = config.terminal_mods or []
 
     fixed_mods: dict[str, str] = {}
     variable_mods: dict[str, list[str]] = {}
-    for m in internal_mods or []:
+    for m in internal_mods:
         for aa in m.residue:
             if m.mod_type == "fixed":
                 fixed_mods[aa] = m.modification
@@ -358,23 +337,28 @@ def digest_peff_sequence(
 
     # Collect all PEFF mod annotations (PSI-MOD)
     all_mods: list[pf.ModResPsi | pf.ModResUnimod] = []
-    if use_psi_mods:
+    if config.use_psi_mods:
         all_mods.extend(peff_entry.mod_res_psi)
 
     # One variant per PEFF event (canonical + each simple/complex independently)
     variants: list[_Variant] = [_canonical(sequence)]
-    if include_simple_variants:
+    if config.include_simple_variants:
         for v in peff_entry.variant_simple:
             variants.append(_apply_simple(sequence, v))
-    if include_complex_variants:
+    if config.include_complex_variants:
         for v in peff_entry.variant_complex:
             variants.append(_apply_complex(sequence, v))
+
+    max_ptm_per_peptide = config.max_ptm_per_peptide
+    use_mod_names = config.use_mod_names
+    semi_enzymatic = config.semi_enzymatic
+    missed_cleavages = config.missed_cleavages
 
     for variant in variants:
         vseq = variant.sequence
         seq_len = len(vseq)
 
-        cut_sites = get_cut_sites(vseq, cleave_on, restrict_after, restrict_before, cterminal)
+        cut_sites = get_cut_sites(vseq, cleave_on, restrict_after, restrict_before, config.cterminal)
         n_cuts = len(cut_sites)
 
         def _process_span(
@@ -406,7 +390,7 @@ def digest_peff_sequence(
                 fixed_positions = {i for i, res in enumerate(pep_seq) if res in fixed_mods}
                 peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
 
-            name = _variant_name(_variant, start, end)
+            span_variant = _variant.source if _variant_in_span(_variant, start, end) else None
             try:
                 peff_variants = _yield_mod_variants(pep_seq, peff_applicable, max_ptm_per_peptide)
             except ValueError:
@@ -486,8 +470,6 @@ def digest_peff_sequence(
                                 ann.append_nterm_mod(tm.modification)
                             else:
                                 ann.append_cterm_mod(tm.modification)
-                    if annotate_variants and name is not None:
-                        ann.peptide_name = name
                     span_results.append(
                         Peptide(
                             proforma=ann,
@@ -495,6 +477,7 @@ def digest_peff_sequence(
                             semi_enzymatic=is_semi,
                             is_protein_nterm=is_protein_nterm,
                             is_protein_cterm=is_protein_cterm,
+                            variant=span_variant,
                         )
                     )
             return span_results
