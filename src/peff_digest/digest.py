@@ -105,9 +105,28 @@ def _apply_complex(sequence: str, v: pf.VariantComplex) -> _Variant:
     return _Variant(new_seq, pos_map, source=v, source_orig=orig_seq)
 
 
-def _variant_name(variant: _Variant, pep_start: int, pep_end: int) -> str | None:
-    """Return a PEFF-notation variant description, or None for canonical."""
+def _variant_in_span(variant: _Variant, pep_start: int, pep_end: int) -> bool:
+    """Return True if the variant's mutation site overlaps the peptide span [pep_start, pep_end)."""
     if variant.source is None:
+        return False
+    if isinstance(variant.source, pf.VariantSimple):
+        mapped = variant.pos_map.get(int(variant.source.position))
+        if mapped is None:
+            return False
+        return pep_start <= mapped < pep_end
+    # VariantComplex: the new sequence occupies [start0, start0+len(new_sequence))
+    v = variant.source
+    start0 = int(v.start_pos) - 1
+    new_len = len(v.new_sequence)
+    # After complex variant, the inserted region sits at [start0, start0+new_len)
+    # in the variant sequence. Check overlap with peptide span.
+    var_end = start0 + new_len
+    return pep_start < var_end and start0 < pep_end
+
+
+def _variant_name(variant: _Variant, pep_start: int, pep_end: int) -> str | None:
+    """Return a PEFF-notation variant description, or None for canonical / not in span."""
+    if not _variant_in_span(variant, pep_start, pep_end):
         return None
     if isinstance(variant.source, pf.VariantSimple):
         v = variant.source
@@ -279,6 +298,7 @@ class Peptide:
     semi_enzymatic: bool
     is_protein_nterm: bool = False
     is_protein_cterm: bool = False
+    variant: pf.VariantSimple | pf.VariantComplex | None = None
 
     @property
     def sequence(self) -> str:
@@ -383,6 +403,7 @@ def digest_peff_sequence(
                 peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
 
             name = _variant_name(_variant, start, end)
+            span_variant = _variant.source if _variant_in_span(_variant, start, end) else None
             try:
                 peff_variants = _yield_mod_variants(pep_seq, peff_applicable, max_ptm_per_peptide)
             except ValueError:
@@ -471,6 +492,7 @@ def digest_peff_sequence(
                             semi_enzymatic=is_semi,
                             is_protein_nterm=is_protein_nterm,
                             is_protein_cterm=is_protein_cterm,
+                            variant=span_variant,
                         )
                     )
             return span_results

@@ -750,3 +750,80 @@ def test_ann_to_map_nterm_sentinel():
     ))
     aak = next(p for p in result if p.sequence == "AAK")
     assert aak.mod_map.get(-1) == "Acetyl", f"Expected -1: Acetyl in mod_map, got {aak.mod_map}"
+
+
+# ---------------------------------------------------------------------------
+# Peptide.variant: only set when peptide span contains the variant
+# ---------------------------------------------------------------------------
+
+
+def test_variant_field_set_when_peptide_contains_simple_variant():
+    """Peptide.variant must be set when the span contains the VariantSimple site."""
+    # "AAAKBBBR": variant at position 2 (A→C). Digest → "AAAK" contains pos 2, "BBBR" does not.
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    # Variant peptide "ACAK" should have .variant set
+    acak = [p for p in result if p.sequence == "ACAK"]
+    assert len(acak) == 1
+    assert acak[0].variant is not None
+    assert isinstance(acak[0].variant, pf.VariantSimple)
+    assert acak[0].variant.position == 2
+
+
+def test_variant_field_none_when_peptide_does_not_contain_simple_variant():
+    """Peptide.variant must be None for peptides from a variant sequence that don't overlap the site."""
+    # "AAAKBBBR": variant at position 2 (A→C). "BBBR" does not contain pos 2.
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    # "BBBR" peptides from variant sequence should have variant=None
+    bbbr_from_variant = [p for p in result if p.sequence == "BBBR"]
+    assert all(p.variant is None for p in bbbr_from_variant)
+
+
+def test_variant_field_none_for_canonical_peptides():
+    """Peptide.variant must be None for all canonical peptides."""
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    canonical = [p for p in result if p.sequence in ("AAAK", "BBBR") and p.variant is None]
+    # There should be canonical "AAAK" and "BBBR" with no variant
+    assert any(p.sequence == "AAAK" for p in canonical)
+    assert any(p.sequence == "BBBR" for p in canonical)
+
+
+def test_variant_field_set_for_complex_variant_in_span():
+    """Peptide.variant must be set for complex variants when the span overlaps."""
+    # "AABBBKCCR": positions 3-5 replaced with "DD" → variant "AADDKCCR"
+    # "AADDK" overlaps the variant site, "CCR" does not.
+    entry = _make_entry(
+        "AABBBKCCR",
+        variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    aaddk = [p for p in result if p.sequence == "AADDK"]
+    assert len(aaddk) == 1
+    assert aaddk[0].variant is not None
+    assert isinstance(aaddk[0].variant, pf.VariantComplex)
+    # "CCR" from variant sequence should have variant=None (doesn't overlap)
+    ccr_all = [p for p in result if p.sequence == "CCR"]
+    assert all(p.variant is None for p in ccr_all)
+
+
+def test_variant_name_not_set_when_peptide_outside_variant():
+    """peptide_name must not carry variant info for peptides that don't overlap the site."""
+    # "AAAKBBBR": variant at position 2. "BBBR" from variant sequence should have no peptide_name.
+    entry = _make_entry(
+        "AAAKBBBR",
+        variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+    )
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+    bbbr = [p for p in result if p.sequence == "BBBR"]
+    assert all(not p.proforma.peptide_name for p in bbbr)
