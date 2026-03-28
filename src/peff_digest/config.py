@@ -23,7 +23,7 @@ class TerminalMod(BaseModel, frozen=True):
 
 
 class DigestConfig(BaseModel):
-    input_file: str
+    input_file: str = ""
     output_file: str = "peptides.csv"
     cleave_on: str = "KR"
     missed_cleavages: int = Field(default=2, ge=0)
@@ -51,10 +51,8 @@ class DigestConfig(BaseModel):
     @field_validator("input_file")
     @classmethod
     def input_file_must_exist(cls, v: str) -> str:
-
         if not v:
-            pass
-
+            return v
         if not Path(v).exists():
             raise ValueError(f"input_file does not exist: {v}")
         return v
