@@ -12,6 +12,7 @@ Skipped: Processed entries (signal peptide / mature-chain trimming).
 """
 
 from __future__ import annotations
+import psimodpy
 
 import copy
 import itertools
@@ -167,11 +168,15 @@ def _mods_in_span(
                             continue  # residue changed by variant — drop this mod
 
                     # Terminal promotion: convert positional mod to terminal sentinel.
-                    if entry.term_spec == TermSpec.N_TERM and local0 == 0 and span_start == 0:
-                        result.append((_NTERM_POS, tag))
+                    # If a mod is terminal-specific but the conditions aren't met, drop it —
+                    # it cannot be validly applied as an internal modification.
+                    if entry.term_spec == TermSpec.N_TERM:
+                        if local0 == 0 and span_start == 0:
+                            result.append((_NTERM_POS, tag))
                         continue
-                    if entry.term_spec == TermSpec.C_TERM and local0 == protein_len - 1 and span_end == protein_len:
-                        result.append((_CTERM_POS, tag))
+                    if entry.term_spec == TermSpec.C_TERM:
+                        if local0 == protein_len - 1 and span_end == protein_len:
+                            result.append((_CTERM_POS, tag))
                         continue
 
             result.append((pep_local, tag))
@@ -315,6 +320,10 @@ def digest_peff_sequence(
     PEFF PTMs (ModResPsi) are applied in combinations of up to
     ``config.max_ptm_per_peptide`` per peptide.  Pass 0 to skip PEFF PTMs entirely.
     """
+    
+    if psi_db is None:
+        psi_db = psimodpy.load()
+    
     sequence = peff_entry.sequence
     _min = config.min_length if config.min_length is not None else 0
     _max = config.max_length if config.max_length is not None else len(sequence)

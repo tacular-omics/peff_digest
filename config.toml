@@ -1,4 +1,4 @@
-input_file = "/home/patrick-garrett/Repos/peff_uniprot_fetcher/small_human.peff"
+input_file = "/home/patrick-garrett/Repos/peff_uniprot_fetcher/p01_argc.peff"
 output_file = "peptides.csv"
 
 cleave_on = "R"
