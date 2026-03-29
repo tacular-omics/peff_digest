@@ -12,7 +12,6 @@ Skipped: Processed entries (signal peptide / mature-chain trimming).
 """
 
 from __future__ import annotations
-import psimodpy
 
 import copy
 import itertools
@@ -22,6 +21,7 @@ from dataclasses import dataclass
 
 import pefftacular as pf
 import peptacular as pt
+import psimodpy
 from psimodpy import AminoAcid, PsiModDatabase, TermSpec
 
 from peff_digest.config import DigestConfig
@@ -320,10 +320,10 @@ def digest_peff_sequence(
     PEFF PTMs (ModResPsi) are applied in combinations of up to
     ``config.max_ptm_per_peptide`` per peptide.  Pass 0 to skip PEFF PTMs entirely.
     """
-    
+
     if psi_db is None:
         psi_db = psimodpy.load()
-    
+
     sequence = peff_entry.sequence
     _min = config.min_length if config.min_length is not None else 0
     _max = config.max_length if config.max_length is not None else len(sequence)
