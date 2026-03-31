@@ -10,8 +10,8 @@ lint:
 
 # Format code
 format:
-	uv run ruff check --select I --fix src
-	uv run ruff format src
+	uv run ruff check --select I --fix src/ tests/
+	uv run ruff format src/ tests/
 
 # Run ty type checker
 ty:

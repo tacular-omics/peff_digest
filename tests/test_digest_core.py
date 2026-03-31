@@ -3,10 +3,9 @@ from __future__ import annotations
 from types import GeneratorType
 
 import pytest
+from conftest import _cfg, _make_entry
 
 from peff_digest import DigestConfig, InternalMod, digest_peff_sequence
-
-from conftest import _cfg, _make_entry
 
 
 def test_digest_returns_generator() -> None:

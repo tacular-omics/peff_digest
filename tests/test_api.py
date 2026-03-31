@@ -8,7 +8,6 @@ import pytest
 from peff_digest import DigestConfig
 from peff_digest.api import _to_dataframe, _write_csv, digest
 
-
 # ---------------------------------------------------------------------------
 # _write_csv
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pefftacular as pf
 import pytest
+from conftest import _cfg, _make_entry
 
 from peff_digest import digest_peff_sequence
 from peff_digest.digest import (
@@ -11,8 +12,6 @@ from peff_digest.digest import (
     _variant_in_span,
     _yield_mod_variants,
 )
-
-from conftest import _cfg, _make_entry
 
 
 def test_variant_simple_produces_substituted_peptide() -> None:
@@ -81,9 +80,9 @@ def test_variant_complex_insertion_longer_sequence() -> None:
     )
     result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
     seqs = {p.sequence for p in result}
-    assert "AAK" in seqs       # canonical
-    assert "AMMMMK" in seqs    # variant (longer)
-    assert "R" in seqs         # both canonical and variant C-term
+    assert "AAK" in seqs  # canonical
+    assert "AMMMMK" in seqs  # variant (longer)
+    assert "R" in seqs  # both canonical and variant C-term
 
 
 def test_no_simple_variants_skips_substituted_peptides() -> None:
@@ -91,9 +90,12 @@ def test_no_simple_variants_skips_substituted_peptides() -> None:
         "AAAKBBBR",
         variant_simple=(pf.VariantSimple(position=2, new_amino_acid="C"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", include_simple_variants=False),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", include_simple_variants=False),
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     assert not any("ACAK" in s for s in seqs)
     assert "AAAK" in seqs
@@ -104,9 +106,12 @@ def test_no_complex_variants_skips_complex_peptides() -> None:
         "AABBBKCCR",
         variant_complex=(pf.VariantComplex(start_pos=3, end_pos=5, new_sequence="DD"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", include_complex_variants=False),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", include_complex_variants=False),
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     assert not any("AADDK" in s for s in seqs)
     assert "AABBBK" in seqs
@@ -204,7 +209,7 @@ def test_variant_in_span_complex_insertion() -> None:
     # "AAKR": replace position 2 (1-based, 'A') with "MMMMM"
     # → variant "AMMMMMKR". Inserted region: [1, 1+5) = [1, 6) in variant coords.
     v = _apply_complex("AAKR", pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMMM"))
-    assert _variant_in_span(v, 0, 4)   # [0,4) overlaps [1,6)
+    assert _variant_in_span(v, 0, 4)  # [0,4) overlaps [1,6)
     assert not _variant_in_span(v, 0, 1)  # [0,1) does NOT overlap [1,6)
 
 
@@ -212,9 +217,7 @@ def test_variant_in_span_boundary_exact() -> None:
     """Variant at exact span boundary (end-exclusive) should not overlap."""
     # Simple variant at position 4 (1-based) → 0-based mapped=3
     # Span [0, 3) should NOT include position 3 (end-exclusive)
-    v = _apply_complex(
-        "AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X")
-    )
+    v = _apply_complex("AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X"))
     # Inserted at start0=3, new_len=1, var_end=4. Span [0,3): 0 < 4 AND 3 < 3 → False
     assert not _variant_in_span(v, 0, 3)
     # Span [3, 6) should overlap: 3 < 4 AND 3 < 6 → True

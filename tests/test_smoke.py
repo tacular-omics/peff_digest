@@ -4,11 +4,10 @@ from pathlib import Path
 
 import pefftacular as pf
 import pytest
+from conftest import FASTA_FILES, PEFF_FILES, _cfg
 
 from peff_digest import digest_peff_sequence
 from peff_digest.io import read_sequences
-
-from conftest import FASTA_FILES, PEFF_FILES, _cfg
 
 
 @pytest.mark.parametrize("peff_path", PEFF_FILES, ids=[f.name for f in PEFF_FILES])
@@ -24,7 +23,8 @@ def test_digest_peff_file_no_crash(peff_path: Path) -> None:
         except Exception:
             continue  # skip malformed entries
         result = digest_peff_sequence(
-            entry, _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
+            entry,
+            _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
         )
         assert hasattr(result, "__iter__")
         n_digested += 1
@@ -37,6 +37,7 @@ def test_digest_fasta_file_no_crash(fasta_path: Path) -> None:
     assert len(sequences) > 0
     for entry in sequences:
         result = digest_peff_sequence(
-            entry, _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
+            entry,
+            _cfg(cleave_on="KR", missed_cleavages=1, min_length=4, max_length=50, max_ptm_per_peptide=2),
         )
         assert hasattr(result, "__iter__")

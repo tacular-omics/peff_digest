@@ -3,18 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import _cfg
 from pydantic import ValidationError
 
 from peff_digest import DigestConfig, InternalMod
-
-from conftest import _cfg
 
 
 def test_config_round_trip_toml(tmp_path: Path) -> None:
     """DigestConfig should round-trip through TOML serialization."""
     config = DigestConfig(
-        input_file="", cleave_on="KR", missed_cleavages=2,
-        min_length=5, max_length=30, max_ptm_per_peptide=3,
+        input_file="",
+        cleave_on="KR",
+        missed_cleavages=2,
+        min_length=5,
+        max_length=30,
+        max_ptm_per_peptide=3,
     )
     path = tmp_path / "test.toml"
     config.to_file(path)
@@ -29,7 +32,9 @@ def test_config_round_trip_toml(tmp_path: Path) -> None:
 def test_config_round_trip_json(tmp_path: Path) -> None:
     """DigestConfig should round-trip through JSON serialization."""
     config = DigestConfig(
-        input_file="", cleave_on="R", missed_cleavages=1,
+        input_file="",
+        cleave_on="R",
+        missed_cleavages=1,
         internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
     )
     path = tmp_path / "test.json"

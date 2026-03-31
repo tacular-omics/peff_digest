@@ -3,10 +3,9 @@ from __future__ import annotations
 import pefftacular as pf
 import psimodpy
 import pytest
+from conftest import _cfg, _make_entry
 
 from peff_digest import InternalMod, digest_peff_sequence
-
-from conftest import _cfg, _make_entry
 
 
 def test_peff_mod_applied_to_peptide() -> None:
@@ -15,9 +14,7 @@ def test_peff_mod_applied_to_peptide() -> None:
     # max_ptm_per_peptide=1 → unmodified + one with MOD:00696 applied.
     entry = _make_entry(
         "ACDEFGR",
-        mod_res_psi=(
-            pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
-        ),
+        mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
     result = list(digest_peff_sequence(entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=True)))
     assert len(result) == 2
@@ -29,9 +26,7 @@ def test_peff_mod_max_ptm_zero_skips_mods() -> None:
     # Same entry as above but max_ptm_per_peptide=0 → only the unmodified peptide.
     entry = _make_entry(
         "ACDEFGR",
-        mod_res_psi=(
-            pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),
-        ),
+        mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
     result = list(digest_peff_sequence(entry, _cfg(cleave_on="R")))
     assert len(result) == 1
@@ -44,9 +39,12 @@ def test_psi_mods_excluded_when_disabled() -> None:
         "ACDEFGR",
         mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=False),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=False),
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     assert len(result) == 1
     assert "ACDEFGR" in seqs
@@ -60,10 +58,13 @@ def test_psimod_validation_drops_mod_after_residue_mutation(psi_db: psimodpy.Psi
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00046", name="O-phospho-L-serine"),),
         variant_simple=(pf.VariantSimple(position=1, new_amino_acid="W"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
+            psi_db=psi_db,
+        )
+    )
     # Canonical peptide "SWK" should have a phospho version
     assert any("MOD:00046" in str(p.proforma) and p.sequence == "SWK" for p in result)
     # Variant peptide "WWK" must NOT carry MOD:00046 (S→W invalidates phospho-serine)
@@ -77,10 +78,13 @@ def test_psimod_validation_retains_mod_on_unchanged_residue(psi_db: psimodpy.Psi
         mod_res_psi=(pf.ModResPsi(positions=(2,), accession="MOD:00046", name="O-phospho-L-serine"),),
         variant_simple=(pf.VariantSimple(position=1, new_amino_acid="W"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True, include_simple_variants=True),
+            psi_db=psi_db,
+        )
+    )
     # Both canonical "ASK" and variant "WSK" should have the phospho version
     assert any("MOD:00046" in str(p.proforma) and p.sequence == "ASK" for p in result)
     assert any("MOD:00046" in str(p.proforma) and p.sequence == "WSK" for p in result)
@@ -93,17 +97,18 @@ def test_psimod_terminal_promotion_nterm(psi_db: psimodpy.PsiModDatabase) -> Non
         "AAKR",
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00050", name="N-acetyl-L-alanine"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
+            psi_db=psi_db,
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     # The modification must appear in nterm notation (leading bracket before sequence)
-    assert any(s.startswith("[MOD:00050]") for s in seqs), \
-        f"Expected nterm-promoted MOD:00050 in {seqs}"
+    assert any(s.startswith("[MOD:00050]") for s in seqs), f"Expected nterm-promoted MOD:00050 in {seqs}"
     # It must NOT appear as an internal mod at index 0 (which would look like A[MOD:00050]AK)
-    assert not any("A[MOD:00050]" in s for s in seqs), \
-        f"MOD:00050 should be terminal, not internal, in {seqs}"
+    assert not any("A[MOD:00050]" in s for s in seqs), f"MOD:00050 should be terminal, not internal, in {seqs}"
 
 
 def test_psimod_terminal_promotion_skipped_for_internal_peptide(psi_db: psimodpy.PsiModDatabase) -> None:
@@ -112,10 +117,13 @@ def test_psimod_terminal_promotion_skipped_for_internal_peptide(psi_db: psimodpy
         "AAAKR",
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00050", name="N-acetyl-L-alanine"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True),
+            psi_db=psi_db,
+        )
+    )
     r_peptides = [p for p in result if p.sequence == "R"]
     assert all("MOD:00050" not in str(p.proforma) for p in r_peptides)
 
@@ -127,18 +135,21 @@ def test_psimod_terminal_promotion_cterm(psi_db: psimodpy.PsiModDatabase) -> Non
         "AAKBA",
         mod_res_psi=(pf.ModResPsi(positions=(5,), accession="MOD:00090", name="L-alanine amide"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="K", max_ptm_per_peptide=1, use_psi_mods=True),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="K", max_ptm_per_peptide=1, use_psi_mods=True),
+            psi_db=psi_db,
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     # The modification must appear in cterm notation (trailing bracket after sequence)
-    assert any(s.endswith("[MOD:00090]") for s in seqs), \
-        f"Expected cterm-promoted MOD:00090 in {seqs}"
+    assert any(s.endswith("[MOD:00090]") for s in seqs), f"Expected cterm-promoted MOD:00090 in {seqs}"
     # It must NOT appear as an internal mod
     ba_seqs = [s for s in seqs if "BA" in s and "MOD:00090" in s]
-    assert all(s.endswith("[MOD:00090]") for s in ba_seqs), \
+    assert all(s.endswith("[MOD:00090]") for s in ba_seqs), (
         f"MOD:00090 should be cterm-promoted, not internal: {ba_seqs}"
+    )
 
 
 def test_two_phase_delta_user_mods_capped_by_peff_mods(psi_db: psimodpy.PsiModDatabase) -> None:
@@ -147,17 +158,26 @@ def test_two_phase_delta_user_mods_capped_by_peff_mods(psi_db: psimodpy.PsiModDa
         "SMKR",
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00046", name="O-phospho-L-serine"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=2, use_psi_mods=True,
-                     internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")]),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                max_ptm_per_peptide=2,
+                use_psi_mods=True,
+                internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+            ),
+            psi_db=psi_db,
+        )
+    )
     smk = [p for p in result if p.sequence == "SMK"]
     # Expected: unmod, phospho-only, oxidation-only, phospho+oxidation (all ≤2 mods)
-    assert any("MOD:00046" in str(p.proforma) and "Oxidation" in str(p.proforma) for p in smk), \
+    assert any("MOD:00046" in str(p.proforma) and "Oxidation" in str(p.proforma) for p in smk), (
         "Should have a peptide with both PEFF phospho and user Oxidation"
+    )
     # No peptide should carry more than 2 total mods
     from peff_digest.digest import _count_mods
+
     for p in smk:
         assert _count_mods(p.proforma) <= 2, f"Peptide has too many mods: {p.proforma}"
 
@@ -168,15 +188,23 @@ def test_two_phase_delta_full_capacity_no_user_mods(psi_db: psimodpy.PsiModDatab
         "SMKR",
         mod_res_psi=(pf.ModResPsi(positions=(1,), accession="MOD:00046", name="O-phospho-L-serine"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1, use_psi_mods=True,
-                     internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")]),
-        psi_db=psi_db,
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                max_ptm_per_peptide=1,
+                use_psi_mods=True,
+                internal_mods=[InternalMod(modification="Oxidation", residue="M", mod_type="variable")],
+            ),
+            psi_db=psi_db,
+        )
+    )
     smk_peptides = [p for p in result if p.sequence == "SMK"]
     # Should have: unmod + phospho-only + oxidation-only (never both, capacity=1)
-    assert not any("MOD:00046" in str(p.proforma) and "Oxidation" in str(p.proforma) for p in smk_peptides), \
+    assert not any("MOD:00046" in str(p.proforma) and "Oxidation" in str(p.proforma) for p in smk_peptides), (
         "Should not have both PEFF and user mod when max_ptm=1"
+    )
 
 
 def test_use_mod_names_outputs_name_instead_of_accession() -> None:
@@ -185,9 +213,12 @@ def test_use_mod_names_outputs_name_instead_of_accession() -> None:
         "ACDEFGR",
         mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
     )
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=True, use_mod_names=True),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(cleave_on="R", max_ptm_per_peptide=1, use_psi_mods=True, use_mod_names=True),
+        )
+    )
     seqs = {str(p.proforma) for p in result}
     assert any("phosphorylated residue" in s for s in seqs), "Mod name must appear in output"
     assert not any("MOD:00696" in s for s in seqs), "Accession must not appear when use_mod_names=True"

@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import peptacular as pt
 import pytest
+from conftest import _cfg, _make_entry
 
 from peff_digest import InternalMod, digest_peff_sequence
 from peff_digest.config import TerminalMod
 from peff_digest.digest import ann_to_map
 
-from conftest import _cfg, _make_entry
-
 
 def test_ann_to_map_internal_mod() -> None:
     """ann_to_map must return the correct position→name mapping for an internal mod."""
     entry = _make_entry("ACKR")
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR",
-                     internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")]),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+            ),
+        )
+    )
     ack_peptides = [p for p in result if p.sequence == "ACK"]
     assert len(ack_peptides) == 1
     mod_map = ack_peptides[0].mod_map
@@ -27,10 +31,14 @@ def test_ann_to_map_internal_mod() -> None:
 def test_ann_to_map_nterm_sentinel() -> None:
     """N-terminal mods must map to key -1 in mod_map."""
     entry = _make_entry("AAKR")
-    result = list(digest_peff_sequence(
-        entry, _cfg(cleave_on="KR",
-                     terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")]),
-    ))
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR", terminal_mods=[TerminalMod(modification="Acetyl", position="nterm", mod_type="fixed")]
+            ),
+        )
+    )
     aak = next(p for p in result if p.sequence == "AAK")
     assert aak.mod_map.get(-1) == "Acetyl", f"Expected -1: Acetyl in mod_map, got {aak.mod_map}"
 

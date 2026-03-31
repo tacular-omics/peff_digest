@@ -7,6 +7,7 @@ import pefftacular as pf
 import peptacular as pt
 import psimodpy
 import pytest
+from conftest import _cfg, _make_entry
 
 from peff_digest import InternalMod
 from peff_digest.io import (
@@ -17,9 +18,6 @@ from peff_digest.io import (
     _try_convert_psimod_to_unimod,
     read_sequences,
 )
-
-from conftest import _cfg, _make_entry
-
 
 # ---------------------------------------------------------------------------
 # _format_variant
@@ -261,10 +259,13 @@ def test_read_sequences_fasta_counts_malformed_entries(tmp_path: Path) -> None:
     fasta = tmp_path / "test.fasta"
     fasta.write_text(">sp|P12345|GOOD\nACDEFGR\n>malformed_entry\nACDEFGR\n")
 
-    with patch("peff_digest.io._fasta_to_entry", side_effect=[
-        pf.SequenceEntry(prefix="sp", db_unique_id="P12345", sequence="ACDEFGR"),
-        ValueError("simulated malformed"),
-    ]):
+    with patch(
+        "peff_digest.io._fasta_to_entry",
+        side_effect=[
+            pf.SequenceEntry(prefix="sp", db_unique_id="P12345", sequence="ACDEFGR"),
+            ValueError("simulated malformed"),
+        ],
+    ):
         seqs, n_malformed = read_sequences(str(fasta))
 
     assert n_malformed == 1
