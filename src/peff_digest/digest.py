@@ -363,6 +363,8 @@ def digest_peff_sequence(
     semi_enzymatic = config.semi_enzymatic
     missed_cleavages = config.missed_cleavages
 
+    seen: set[str] = set()
+
     for variant in variants:
         vseq = variant.sequence
         seq_len = len(vseq)
@@ -491,10 +493,17 @@ def digest_peff_sequence(
                     )
             return span_results
 
+        def _yield_deduped(peptides: list[Peptide]) -> Generator[Peptide, None, None]:
+            for peptide in peptides:
+                key = str(peptide.proforma)
+                if key not in seen:
+                    seen.add(key)
+                    yield peptide
+
         # Fully enzymatic peptides
         for i in range(n_cuts - 1):
             for j in range(i + 1, min(i + 2 + missed_cleavages, n_cuts)):
-                yield from _process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False)
+                yield from _yield_deduped(_process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False))
 
         # Semi-enzymatic peptides (one free end)
         if semi_enzymatic:
@@ -508,7 +517,7 @@ def digest_peff_sequence(
                         continue
                     mc = bisect_right(cut_sites, end - 1) - enz_idx - 1
                     if mc <= missed_cleavages:
-                        yield from _process_span(enz_pos, end, mc=mc, is_semi=True)
+                        yield from _yield_deduped(_process_span(enz_pos, end, mc=mc, is_semi=True))
 
                 # Left-open: non-enzymatic N-term, enzymatic C-term
                 for start in range(enz_pos - _min, -1, -1):
@@ -518,7 +527,7 @@ def digest_peff_sequence(
                         continue
                     mc = enz_idx - bisect_left(cut_sites, start + 1)
                     if mc <= missed_cleavages:
-                        yield from _process_span(start, enz_pos, mc=mc, is_semi=True)
+                        yield from _yield_deduped(_process_span(start, enz_pos, mc=mc, is_semi=True))
 
 
 def ann_to_map(ann: pt.ProFormaAnnotation) -> tuple[str, dict[int, str]]:

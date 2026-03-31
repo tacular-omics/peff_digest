@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pefftacular>=0.1.0",
-    "peptacular>=0.1.0",
+    "peptacular>=3.1.0",
     "peff_uniprot_fetcher>=0.1.0",
     "polars>=1.0",
     "pydantic>=2.0",
@@ -41,6 +41,7 @@ packages = ["src/peff_digest"]
 package = true
 dev-dependencies = [
     "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
     "ruff>=0.14.11",
     "ty>=0.0.11",
 ]

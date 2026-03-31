@@ -26,3 +26,6 @@ check:
 # Run tests
 test:
     uv run pytest tests
+
+test-cov:
+    uv run pytest --cov=peff_digest 
