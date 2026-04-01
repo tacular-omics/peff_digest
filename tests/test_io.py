@@ -11,11 +11,11 @@ from conftest import _cfg, _make_entry
 
 from peff_digest import InternalMod
 from peff_digest.io import (
+    _dedup_rows,
     _digest_batch_worker,
     _digest_worker,
     _format_variant,
     _get_uni_db,
-    _try_convert_psimod_to_unimod,
     read_sequences,
 )
 
@@ -70,8 +70,8 @@ def test_digest_worker_mass_within_range_kept() -> None:
     rows = _digest_worker(entry, config)
     assert len(rows) > 0
     for row in rows:
-        assert row[4] is not None
-        assert 100.0 <= row[4] <= 2000.0
+        assert row[5] is not None
+        assert 100.0 <= row[5] <= 2000.0
 
 
 def test_digest_worker_variant_column_from_peptide_variant() -> None:
@@ -85,9 +85,9 @@ def test_digest_worker_variant_column_from_peptide_variant() -> None:
     # Find the variant row for "ACAK"
     acak_rows = [r for r in rows if "ACAK" in r[1]]
     assert len(acak_rows) == 1
-    assert acak_rows[0][2] == "(2|C)"
+    assert acak_rows[0][3] == "(2|C)"
     # Canonical rows should have None variant
-    canonical_rows = [r for r in rows if r[2] is None]
+    canonical_rows = [r for r in rows if r[3] is None]
     assert len(canonical_rows) >= 2  # AAAK and BBBR from canonical
 
 
@@ -170,7 +170,7 @@ def test_digest_worker_keep_invalid_mass_rows_when_flag_off() -> None:
         rows = _digest_worker(entry, cfg)
 
     assert len(rows) == 2
-    assert all(r[4] is None for r in rows)
+    assert all(r[5] is None for r in rows)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ def test_digest_batch_worker_multiple_sequences() -> None:
     config = _cfg(cleave_on="K")
     rows = _digest_batch_worker(entries, config)
     protein_ids = {r[0] for r in rows}
-    assert protein_ids == {"TEST_ID"}  # both have same ID in test helper
+    assert protein_ids == {"sp|TEST_ID"}  # both have same ID in test helper
     assert len(rows) >= 4  # at least "AK", "B", "CK", "D"
 
 
@@ -212,42 +212,61 @@ def test_get_uni_db_returns_database_and_caches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _try_convert_psimod_to_unimod
+# _dedup_rows
 # ---------------------------------------------------------------------------
 
 
-def test_try_convert_psimod_to_unimod_converts_mod_tag(psi_db: psimodpy.PsiModDatabase) -> None:
-    """MOD:00696 (phospho) has a UniMod xref and must be converted to UNIMOD:21."""
-    uni_db = _get_uni_db()
-    ann = pt.parse("ACD[MOD:00696]EFGR")
-    result = _try_convert_psimod_to_unimod(ann, psi_db, uni_db)
-
-    assert result is not None
-    assert "UNIMOD:21" in str(result)
-    assert "MOD:00696" not in str(result)
+def _r(pid: str, pform_id: str, mc: int, semi: bool) -> tuple:
+    # Use pform_id as part of the sequence so rows with distinct pform_ids are distinct sequences
+    return (pid, f"SEQ_{pform_id}", pform_id, None, 3, 300.0, mc, semi)
 
 
-def test_try_convert_psimod_to_unimod_returns_none_when_no_unimod_xref(
-    psi_db: psimodpy.PsiModDatabase,
-) -> None:
-    """MOD:00050 has no UniMod xref — conversion must return None."""
-    uni_db = _get_uni_db()
-    ann = pt.parse("[MOD:00050]-AAK")
-    result = _try_convert_psimod_to_unimod(ann, psi_db, uni_db)
-
-    assert result is None
+def test_dedup_rows_no_duplicates_returns_all() -> None:
+    rows = [_r("P1", "A|", 0, False), _r("P1", "B|", 0, False)]
+    result = _dedup_rows(rows)
+    assert len(result) == 2
+    assert {r[2] for r in result} == {"A|", "B|"}
+    assert all(r[8] == 1 for r in result)
 
 
-def test_try_convert_psimod_to_unimod_passes_through_non_mod_tags(
-    psi_db: psimodpy.PsiModDatabase,
-) -> None:
-    """Tags that do not start with 'MOD:' must pass through unchanged."""
-    uni_db = _get_uni_db()
-    ann = pt.parse("AC[Carbamidomethyl]K")
-    result = _try_convert_psimod_to_unimod(ann, psi_db, uni_db)
+def test_dedup_rows_lower_mc_wins() -> None:
+    # Same ProForma sequence, two rows → 1 unique sequence
+    rows = [_r("P1", "A|", 2, False), _r("P1", "A|", 1, False)]
+    result = _dedup_rows(rows)
+    assert len(result) == 1
+    assert result[0][6] == 1
+    assert result[0][8] == 1  # both rows had the same sequence "SEQ"
 
-    assert result is not None
-    assert "Carbamidomethyl" in str(result)
+
+def test_dedup_rows_keeps_distinct_sequences() -> None:
+    # Different ProForma sequences → both rows are kept, each gets n_peptidoforms=2
+    row1 = ("P1", "SEQ[Phospho]", "A|", None, 3, 300.0, 1, False)
+    row2 = ("P1", "S[Phospho]EQ", "A|", None, 3, 300.0, 0, False)
+    result = _dedup_rows([row1, row2])
+    assert len(result) == 2
+    assert result[0][8] == 2
+    assert result[1][8] == 2
+
+
+def test_dedup_rows_same_mc_prefers_non_semi() -> None:
+    rows = [_r("P1", "A|", 1, True), _r("P1", "A|", 1, False)]
+    result = _dedup_rows(rows)
+    assert len(result) == 1
+    assert result[0][7] is False
+    assert result[0][8] == 1  # same sequence "SEQ" in both rows
+
+
+def test_dedup_rows_preserves_first_appearance_order() -> None:
+    # Third row is an exact duplicate of first (same sequence) and should be dropped
+    row_a1 = _r("P1", "A|", 0, False)
+    row_b = _r("P1", "B|", 0, False)
+    row_a2 = ("P1", row_a1[1], "A|", None, 3, 300.0, 1, False)  # same seq as row_a1, worse MC
+    result = _dedup_rows([row_a1, row_b, row_a2])
+    assert [r[2] for r in result] == ["A|", "B|"]
+
+
+def test_dedup_rows_empty_returns_empty() -> None:
+    assert _dedup_rows([]) == []
 
 
 # ---------------------------------------------------------------------------

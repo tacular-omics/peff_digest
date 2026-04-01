@@ -147,3 +147,77 @@ def test_digest_peptide_mass_returns_positive_float() -> None:
         m = p.mass
         assert isinstance(m, float), f"mass should be float, got {type(m)}"
         assert m > 0, f"mass should be positive, got {m}"
+
+
+# ---------------------------------------------------------------------------
+# fixed_mod_overrides_peff
+# ---------------------------------------------------------------------------
+
+
+def test_fixed_mod_override_true_drops_peff_mod() -> None:
+    """Default (override=True): PEFF mod at C is dropped; fixed CAM is applied."""
+    import pefftacular as pf
+
+    entry = _make_entry(
+        "ACKR",
+        mod_res_psi=(pf.ModResPsi(positions=(2,), accession="MOD:00696", name="phosphorylated residue"),),
+    )
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                max_ptm_per_peptide=1,
+                use_psi_mods=True,
+                fixed_mod_overrides_peff=True,
+                internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+            ),
+        )
+    )
+    ack = [p for p in result if p.sequence == "ACK"]
+    # PEFF mod should be absent — replaced by fixed mod
+    assert all("MOD:00696" not in str(p.proforma) for p in ack)
+    assert all("Carbamidomethyl" in str(p.proforma) for p in ack)
+
+
+def test_fixed_mod_override_false_keeps_peff_mod() -> None:
+    """override=False: PEFF mod at C is kept; fixed CAM is skipped at that position."""
+    import pefftacular as pf
+
+    entry = _make_entry(
+        "ACKR",
+        mod_res_psi=(pf.ModResPsi(positions=(2,), accession="MOD:00696", name="phosphorylated residue"),),
+    )
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                max_ptm_per_peptide=1,
+                use_psi_mods=True,
+                fixed_mod_overrides_peff=False,
+                internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+            ),
+        )
+    )
+    ack = [p for p in result if p.sequence == "ACK"]
+    # The PEFF-modified peptide must exist and must NOT also carry CAM
+    assert any("MOD:00696" in str(p.proforma) and "Carbamidomethyl" not in str(p.proforma) for p in ack)
+
+
+def test_fixed_mod_override_false_applies_when_no_peff_mod() -> None:
+    """override=False: fixed mod still applies at residues with no PEFF annotation."""
+    entry = _make_entry("ACKR")
+    result = list(
+        digest_peff_sequence(
+            entry,
+            _cfg(
+                cleave_on="KR",
+                fixed_mod_overrides_peff=False,
+                internal_mods=[InternalMod(modification="Carbamidomethyl", residue="C", mod_type="fixed")],
+            ),
+        )
+    )
+    ack = [p for p in result if p.sequence == "ACK"]
+    assert len(ack) == 1
+    assert "Carbamidomethyl" in str(ack[0].proforma)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from pathlib import Path
 
 import pefftacular as pf
@@ -10,9 +11,36 @@ import peptacular as pt
 from psimodpy import PsiModDatabase
 
 from peff_digest.config import DigestConfig
-from peff_digest.digest import _apply_mod, ann_to_map, digest_peff_sequence
+from peff_digest.digest import ann_to_map, digest_peff_sequence
 
 logger = logging.getLogger(__name__)
+
+AA_RESIDUE_MASSES: dict[str, float] = {
+    aa: m for aa in "ACDEFGHIKLMNPQRSTVWY" if (m := pt.AA_LOOKUP[aa].monoisotopic_mass) is not None
+}
+
+
+def _proforma_to_mass_array(ann: pt.ProFormaAnnotation, mod_mass_cache: dict[str, float]) -> list[float]:
+    """Build a per-residue mass array from a ProFormaAnnotation."""
+    masses = [AA_RESIDUE_MASSES[aa] for aa in ann.stripped_sequence]
+    if ann._internal_mods is not None:
+        for pos, mod_dict in ann._internal_mods.items():
+            for mod, cnt in mod_dict.items():
+                if mod not in mod_mass_cache:
+                    mod_mass_cache[mod] = pt.ModificationTags.from_string(mod).get_mass(monoisotopic=True)
+                masses[pos] += mod_mass_cache[mod] * cnt
+    if ann._nterm_mods is not None:
+        for mod, cnt in ann._nterm_mods.items():
+            if mod not in mod_mass_cache:
+                mod_mass_cache[mod] = pt.ModificationTags.from_string(mod).get_mass(monoisotopic=True)
+            masses[0] += mod_mass_cache[mod] * cnt
+    if ann._cterm_mods is not None:
+        for mod, cnt in ann._cterm_mods.items():
+            if mod not in mod_mass_cache:
+                mod_mass_cache[mod] = pt.ModificationTags.from_string(mod).get_mass(monoisotopic=True)
+            masses[-1] += mod_mass_cache[mod] * cnt
+    return masses
+
 
 # ---------------------------------------------------------------------------
 # Lazy database loaders (cached per process for multiprocessing)
@@ -40,44 +68,6 @@ def _get_uni_db():
 
         _UNI_DB = _unimodpy.load()
     return _UNI_DB
-
-
-# ---------------------------------------------------------------------------
-# PSI-MOD → UniMod conversion
-# ---------------------------------------------------------------------------
-
-
-def _try_convert_psimod_to_unimod(
-    ann: pt.ProFormaAnnotation,
-    psi_db: PsiModDatabase,
-    uni_db,
-) -> pt.ProFormaAnnotation | None:
-    """Replace MOD:NNNNN tags with UNIMOD:N accessions.
-
-    Returns None if any PSI-MOD mod has no UniMod xref — the caller should drop the peptide.
-    Non-PSI-MOD tags (user-added mods) are passed through unchanged.
-    """
-    sequence, mod_map = ann_to_map(ann)
-    new_mod_map: dict[int, str] = {}
-    for pos, tag in mod_map.items():
-        if tag.startswith("MOD:"):
-            psi_entry = psi_db.get_by_id(tag)
-            if psi_entry is None or not psi_entry.xref_unimod:
-                return None
-            try:
-                unimod_id = int(psi_entry.xref_unimod.replace("Unimod:", "").split("#")[0])
-            except ValueError:
-                return None
-            if uni_db.get_by_id(unimod_id) is None:
-                return None
-            new_mod_map[pos] = f"UNIMOD:{unimod_id}"
-        else:
-            new_mod_map[pos] = tag
-    new_ann = pt.parse(sequence)
-    seq_len = len(sequence)
-    for pos, tag in new_mod_map.items():
-        _apply_mod(new_ann, pos, tag, seq_len)
-    return new_ann
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +134,42 @@ def read_sequences(path: str) -> tuple[list[pf.SequenceEntry], int]:
 # Multiprocessing worker functions
 # ---------------------------------------------------------------------------
 
+_Row = tuple[str, str, str, str | None, int, float | None, int, bool, list[float] | None, int]
+
+
+def _dedup_rows(rows: list[tuple]) -> list[_Row]:
+    """Deduplicate rows by peptidoform_id, keeping the best per unique form.
+
+    Selection: lowest missed_cleavages wins; ties broken by preferring
+    non-semi-enzymatic (False < True). First-appearance order is preserved.
+    The final field n_peptidoforms records how many raw rows shared the key.
+    """
+    # Dedup on the full ProForma sequence string so positional mod variants are kept
+    # as separate rows.  Only exact duplicates (same bare seq + same mod positions)
+    # are collapsed, keeping the one with lowest missed_cleavages (non-semi preferred).
+    seq_best: dict[str, tuple] = {}
+    seq_order: list[str] = []
+    for row in rows:
+        seq = row[1]
+        if seq not in seq_best:
+            seq_best[seq] = row
+            seq_order.append(seq)
+        elif (row[6], row[7]) < (seq_best[seq][6], seq_best[seq][7]):
+            seq_best[seq] = row
+
+    # n_peptidoforms: count of distinct ProForma sequences per peptidoform_id group
+    pform_count: dict[str, int] = {}
+    for row in seq_best.values():
+        pform_count[row[2]] = pform_count.get(row[2], 0) + 1
+
+    return [(*seq_best[s], pform_count[seq_best[s][2]]) for s in seq_order]
+
+
+def _format_protein_id(entry: pf.SequenceEntry) -> str:
+    """Return the fullest available protein identifier (e.g. sp|Q9Y2X3|NOP5_HUMAN)."""
+    parts = [p for p in (entry.prefix, entry.db_unique_id, entry.id) if p]
+    return "|".join(parts) if len(parts) > 1 else entry.db_unique_id
+
 
 def _format_variant(variant: pf.VariantSimple | pf.VariantComplex | None) -> str | None:
     """Format a variant object as a PEFF-notation string for output."""
@@ -157,32 +183,46 @@ def _format_variant(variant: pf.VariantSimple | pf.VariantComplex | None) -> str
 def _digest_worker(
     sequence: pf.SequenceEntry,
     config: DigestConfig,
-) -> list[tuple[str, str, str | None, int, float | None]]:
+) -> list[_Row]:
     psi_db = _get_psi_db() if config.use_psi_mods else None
-    protein_id = sequence.db_unique_id
-    peptides = digest_peff_sequence(sequence, config, psi_db=psi_db)
+    uni_db = _get_uni_db() if config.use_unimod_output else None
+    protein_id = _format_protein_id(sequence)
+    _mod_mass_cache: dict[str, float] = {}
     rows = []
-    for peptide in peptides:
+    for peptide in digest_peff_sequence(sequence, config, psi_db=psi_db, uni_db=uni_db):
         ann = peptide.proforma
+        bare_seq, mod_map = ann_to_map(ann)
+        mod_counter = Counter()
+        for pos in mod_map:
+            mod_counter[mod_map[pos]] += 1
+
+        mod_str = "".join(f"[{k}]^{v}" if v != 1 else f"[{k}]" for k, v in sorted(mod_counter.items()))
+        peptidoform_id = f"{mod_str}?{bare_seq}" if mod_str else bare_seq
         variant_str = _format_variant(peptide.variant)
-        if config.use_unimod_output:
-            ann = _try_convert_psimod_to_unimod(ann, _get_psi_db(), _get_uni_db())
-            if ann is None:
-                continue
         try:
-            mass = ann.mass()
+            mass = None if "X" in ann.stripped_sequence else ann.mass()
         except Exception:
             mass = None
         if mass is None:
             logger.debug("Could not compute mass for peptide %s (protein %s)", str(ann), protein_id)
-        if mass is None and config.drop_invalid_mass:
-            continue
-        if mass is not None and config.min_mass is not None and mass < config.min_mass:
-            continue
-        if mass is not None and config.max_mass is not None and mass > config.max_mass:
-            continue
-        rows.append((protein_id, str(ann), variant_str, len(ann), mass))
-    return rows
+        try:
+            mass_array: list[float] | None = _proforma_to_mass_array(ann, _mod_mass_cache)
+        except Exception:
+            mass_array = None
+        rows.append(
+            (
+                protein_id,
+                str(ann),
+                peptidoform_id,
+                variant_str,
+                len(ann),
+                mass,
+                peptide.missed_cleavages,
+                peptide.semi_enzymatic,
+                mass_array,
+            )
+        )
+    return _dedup_rows(rows)
 
 
 def _digest_batch_worker(

@@ -44,8 +44,10 @@ class DigestConfig(BaseModel):
     use_unimod_output: bool = False
     include_simple_variants: bool = True
     include_complex_variants: bool = True
+    fixed_mod_overrides_peff: bool = True
     workers: int | None = Field(default=None, ge=1)
     batch_size: int = Field(default=1, ge=1)
+    consolidate_proteins: bool = False
 
     @field_validator("input_file")
     @classmethod

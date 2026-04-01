@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 from bisect import bisect_left, bisect_right
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ import psimodpy
 from psimodpy import AminoAcid, PsiModDatabase, TermSpec
 
 from peff_digest.config import DigestConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_cut_sites(
@@ -156,7 +159,7 @@ def _mods_in_span(
             pep_local = local0 - span_start
             if not (0 <= pep_local < (span_end - span_start)):
                 continue
-            tag = mod.name if use_mod_names else mod.accession
+            tag = f"M:{mod.name}" if use_mod_names else mod.accession
 
             if psi_db is not None:
                 entry = psi_db.get_by_id(mod.accession)
@@ -281,6 +284,53 @@ def _yield_user_mod_variants(
 
 
 # ---------------------------------------------------------------------------
+# PSI-MOD → UniMod conversion
+# ---------------------------------------------------------------------------
+
+
+def _try_convert_psimod_to_unimod(
+    ann: pt.ProFormaAnnotation,
+    psi_db: PsiModDatabase,
+    uni_db,
+) -> pt.ProFormaAnnotation | None:
+    """Replace MOD:/M: tags with UNIMOD:/U: equivalents.
+
+    Returns None if any PSI-MOD mod has no UniMod xref — the caller should drop the peptide.
+    Non-PSI-MOD tags are passed through unchanged.
+    """
+    sequence, mod_map = ann_to_map(ann)
+    new_mod_map: dict[int, str] = {}
+    for pos, tag in mod_map.items():
+        if tag.startswith("MOD:"):
+            psi_entry = psi_db.get_by_id(tag)
+            if psi_entry is None or not psi_entry.xref_unimod:
+                return None
+            try:
+                unimod_id = int(psi_entry.xref_unimod.replace("Unimod:", "").split("#")[0])
+            except ValueError:
+                return None
+            if uni_db.get_by_id(unimod_id) is None:
+                return None
+            new_mod_map[pos] = f"UNIMOD:{unimod_id}"
+        elif tag.startswith("M:"):
+            name = tag[2:]
+            psi_entry = psi_db.get_by_name(name)
+            if psi_entry is None or not psi_entry.xref_unimod:
+                return None
+            uni_entry = uni_db.get_by_id(psi_entry.xref_unimod)
+            if uni_entry is None:
+                return None
+            new_mod_map[pos] = f"U:{uni_entry.name}"
+        else:
+            new_mod_map[pos] = tag
+    new_ann = pt.parse(sequence)
+    seq_len = len(sequence)
+    for pos, tag in new_mod_map.items():
+        _apply_mod(new_ann, pos, tag, seq_len)
+    return new_ann
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -312,6 +362,7 @@ def digest_peff_sequence(
     peff_entry: pf.SequenceEntry,
     config: DigestConfig,
     psi_db: PsiModDatabase | None = None,
+    uni_db=None,
 ) -> Generator[Peptide, None, None]:
     """
     Digest a PEFF SequenceEntry and return all peptide variants as Peptide objects.
@@ -319,10 +370,18 @@ def digest_peff_sequence(
     Each PEFF VariantSimple / VariantComplex is applied independently (not combined).
     PEFF PTMs (ModResPsi) are applied in combinations of up to
     ``config.max_ptm_per_peptide`` per peptide.  Pass 0 to skip PEFF PTMs entirely.
+
+    When ``config.use_unimod_output`` is True, PSI-MOD tags are converted to UniMod;
+    peptides with no UniMod xref are dropped.  Mass filters (``min_mass``,
+    ``max_mass``, ``drop_invalid_mass``) are applied before yielding.
     """
 
     if psi_db is None:
         psi_db = psimodpy.load()
+    if config.use_unimod_output and uni_db is None:
+        import unimodpy as _unimodpy
+
+        uni_db = _unimodpy.load()
 
     sequence = peff_entry.sequence
     _min = config.min_length if config.min_length is not None else 0
@@ -396,10 +455,12 @@ def digest_peff_sequence(
             # ----------------------------------------------------------------
             peff_applicable = _mods_in_span(_variant, start, end, all_mods, use_mod_names, psi_db, _seq_len)
 
-            # Drop PEFF mods at positions reserved for fixed user mods.
+            # Compute fixed-mod positions; when override mode is on, drop PEFF mods there.
+            fixed_positions: set[int] = set()
             if fixed_mods:
                 fixed_positions = {i for i, res in enumerate(pep_seq) if res in fixed_mods}
-                peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
+                if config.fixed_mod_overrides_peff:
+                    peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
 
             span_variant = _variant.source if _variant_in_span(_variant, start, end) else None
             try:
@@ -455,12 +516,13 @@ def digest_peff_sequence(
                 user_variants = _yield_user_mod_variants(peff_ann, filtered_user, remaining)
 
                 for ann in user_variants:
-                    # Apply fixed internal mods unconditionally (positions were excluded
-                    # from PEFF and user variable pools so no double-mod conflict).
+                    # Apply fixed internal mods (skip occupied positions when override is off).
                     if fixed_mods:
                         for aa, mod_str in fixed_mods.items():
                             for i, res in enumerate(pep_seq):
                                 if res == aa:
+                                    if not config.fixed_mod_overrides_peff and i in occupied:
+                                        continue
                                     ann.append_internal_mod_at_index(i, mod_str)
                     # Apply fixed terminal mods.
                     if terminal_mods:
@@ -478,8 +540,12 @@ def digest_peff_sequence(
                             if tm.residue is not None and term_aa not in tm.residue:
                                 continue
                             if tm.position == "nterm":
+                                if not config.fixed_mod_overrides_peff and _NTERM_POS in occupied:
+                                    continue
                                 ann.append_nterm_mod(tm.modification)
                             else:
+                                if not config.fixed_mod_overrides_peff and _CTERM_POS in occupied:
+                                    continue
                                 ann.append_cterm_mod(tm.modification)
                     span_results.append(
                         Peptide(
@@ -500,10 +566,40 @@ def digest_peff_sequence(
                     seen.add(key)
                     yield peptide
 
+        def _postprocess(peptides: list[Peptide]) -> Generator[Peptide, None, None]:
+            for peptide in _yield_deduped(peptides):
+                ann = peptide.proforma
+                if config.use_unimod_output:
+                    ann = _try_convert_psimod_to_unimod(ann, psi_db, uni_db)
+                    if ann is None:
+                        continue
+                    peptide = Peptide(
+                        proforma=ann,
+                        missed_cleavages=peptide.missed_cleavages,
+                        semi_enzymatic=peptide.semi_enzymatic,
+                        is_protein_nterm=peptide.is_protein_nterm,
+                        is_protein_cterm=peptide.is_protein_cterm,
+                        variant=peptide.variant,
+                    )
+                if config.min_mass is not None or config.max_mass is not None or config.drop_invalid_mass:
+                    try:
+                        mass = None if "X" in ann.stripped_sequence else ann.mass()
+                    except Exception:
+                        mass = None
+                    if mass is None:
+                        logger.debug("Could not compute mass for peptide %s", str(ann))
+                    if mass is None and config.drop_invalid_mass:
+                        continue
+                    if mass is not None and config.min_mass is not None and mass < config.min_mass:
+                        continue
+                    if mass is not None and config.max_mass is not None and mass > config.max_mass:
+                        continue
+                yield peptide
+
         # Fully enzymatic peptides
         for i in range(n_cuts - 1):
             for j in range(i + 1, min(i + 2 + missed_cleavages, n_cuts)):
-                yield from _yield_deduped(_process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False))
+                yield from _postprocess(_process_span(cut_sites[i], cut_sites[j], mc=j - i - 1, is_semi=False))
 
         # Semi-enzymatic peptides (one free end)
         if semi_enzymatic:
@@ -517,7 +613,7 @@ def digest_peff_sequence(
                         continue
                     mc = bisect_right(cut_sites, end - 1) - enz_idx - 1
                     if mc <= missed_cleavages:
-                        yield from _yield_deduped(_process_span(enz_pos, end, mc=mc, is_semi=True))
+                        yield from _postprocess(_process_span(enz_pos, end, mc=mc, is_semi=True))
 
                 # Left-open: non-enzymatic N-term, enzymatic C-term
                 for start in range(enz_pos - _min, -1, -1):
@@ -527,7 +623,7 @@ def digest_peff_sequence(
                         continue
                     mc = enz_idx - bisect_left(cut_sites, start + 1)
                     if mc <= missed_cleavages:
-                        yield from _yield_deduped(_process_span(start, enz_pos, mc=mc, is_semi=True))
+                        yield from _postprocess(_process_span(start, enz_pos, mc=mc, is_semi=True))
 
 
 def ann_to_map(ann: pt.ProFormaAnnotation) -> tuple[str, dict[int, str]]:
