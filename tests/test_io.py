@@ -289,3 +289,68 @@ def test_read_sequences_fasta_counts_malformed_entries(tmp_path: Path) -> None:
 
     assert n_malformed == 1
     assert len(seqs) == 1
+
+
+# ---------------------------------------------------------------------------
+# read_sequences with malformed PEFF entries
+# ---------------------------------------------------------------------------
+
+_PEFF_HEADER = "# PEFF 1.0\n# //\n# DbName=testdb\n# Prefix=sp\n# DbVersion=1\n# DbSource=http://example.com\n# NumberOfEntries=4\n# SequenceType=AA\n# //\n"
+
+
+def _ids(seqs: list[pf.SequenceEntry]) -> list[str]:
+    return [s.db_unique_id for s in seqs]
+
+
+def test_read_sequences_peff_skips_malformed_entry_and_keeps_reading(tmp_path: Path) -> None:
+    peff = tmp_path / "test.peff"
+    peff.write_text(
+        _PEFF_HEADER + ">sp:P1 \\Length=5\nACDEF\n"
+        ">sp:P2 \\Length=notanumber\nACDEF\n"  # bad integer: malformed on every pefftacular version
+        ">sp:P3 \\Length=5\nGHIKL\n"
+        ">sp:P4 \\Length=5\nMNPQR\n"
+    )
+    seqs, n_malformed = read_sequences(str(peff))
+    assert _ids(seqs) == ["P1", "P3", "P4"]
+    assert n_malformed == 1
+
+
+def test_read_sequences_peff_malformed_last_entry(tmp_path: Path) -> None:
+    peff = tmp_path / "test.peff"
+    peff.write_text(_PEFF_HEADER + ">sp:P1 \\Length=5\nACDEF\n>sp:P2 \\Length=x\nACDEF\n")
+    seqs, n_malformed = read_sequences(str(peff))
+    assert _ids(seqs) == ["P1"]
+    assert n_malformed == 1
+
+
+def test_read_sequences_peff_consecutive_malformed_entries(tmp_path: Path) -> None:
+    peff = tmp_path / "test.peff"
+    peff.write_text(_PEFF_HEADER + ">sp:P1 \\Length=x\nACDEF\n>sp:P2 \\Length=y\nACDEF\n>sp:P3 \\Length=5\nGHIKL\n")
+    seqs, n_malformed = read_sequences(str(peff))
+    assert _ids(seqs) == ["P3"]
+    assert n_malformed == 2
+
+
+def test_read_sequences_peff_empty_sequence_entry(tmp_path: Path) -> None:
+    # pefftacular >= 1.0 rejects an entry with no sequence; older versions accept it.
+    peff = tmp_path / "test.peff"
+    peff.write_text(_PEFF_HEADER + ">sp:P1\nACDEF\n>sp:P2\n>sp:P3\nGHIKL\n")
+    seqs, n_malformed = read_sequences(str(peff))
+    ids = _ids(seqs)
+    assert ids[0] == "P1" and ids[-1] == "P3"
+    assert len(ids) + n_malformed == 3
+
+
+def test_read_sequences_peff_text_before_first_entry_is_skipped(tmp_path: Path) -> None:
+    peff = tmp_path / "test.peff"
+    peff.write_text(_PEFF_HEADER + "STRAYSEQ\n>sp:P1\nACDEF\n")
+    seqs, n_malformed = read_sequences(str(peff))
+    assert _ids(seqs) == ["P1"]
+    assert n_malformed == 1
+
+
+def test_read_sequences_peff_invalid_header_raises(tmp_path: Path) -> None:
+    peff = tmp_path / "test.peff"
+    peff.write_text("# PEFF\n>sp:P1\nACDEF\n")
+    with pytest.raises(pf.PeffParseError):
+        read_sequences(str(peff))
