@@ -222,3 +222,38 @@ def test_use_mod_names_outputs_name_instead_of_accession() -> None:
     seqs = {str(p.proforma) for p in result}
     assert any("phosphorylated residue" in s for s in seqs), "Mod name must appear in output"
     assert not any("MOD:00696" in s for s in seqs), "Accession must not appear when use_mod_names=True"
+
+
+@pytest.mark.parametrize("use_mod_names", [False, True])
+def test_unimod_output_converts_psimod_tags(use_mod_names: bool) -> None:
+    """MOD:00696 (xref "Unimod:21#S") converts to UniMod with and without use_mod_names.
+
+    Regression: the M:<name> path passed the raw xref string to get_by_id, got None, and
+    silently dropped every modified peptide.
+    """
+    entry = _make_entry(
+        "ACDEFGR",
+        mod_res_psi=(pf.ModResPsi(positions=(3,), accession="MOD:00696", name="phosphorylated residue"),),
+    )
+    cfg = _cfg(
+        cleave_on="R",
+        max_ptm_per_peptide=1,
+        use_psi_mods=True,
+        use_mod_names=use_mod_names,
+        use_unimod_output=True,
+    )
+    seqs = {str(p.proforma) for p in digest_peff_sequence(entry, cfg)}
+    assert len(seqs) == 2, seqs
+    expected = "Phospho" if use_mod_names else "UNIMOD:21"
+    assert any(expected in s for s in seqs), seqs
+    assert not any("[MOD:" in s or "[M:" in s for s in seqs), seqs
+
+
+@pytest.mark.parametrize(
+    ("xref", "expected"),
+    [("Unimod:21", 21), ("Unimod:21#S", 21), ("Unimod:", None), ("Unimod:x", None)],
+)
+def test_unimod_id_from_xref(xref: str, expected: int | None) -> None:
+    from peff_digest.digest import _unimod_id_from_xref
+
+    assert _unimod_id_from_xref(xref) == expected
