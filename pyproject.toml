@@ -1,20 +1,20 @@
 [project]
 name = "peff_digest"
-version = "0.1.0"
+version = "0.2.0"
 description = "PEFF-aware in-silico protein digestion with PTM enumeration, sequence variants, and ProForma output."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 keywords = ["proteomics", "PEFF", "peptide", "digestion", "PTM", "ProForma", "bioinformatics"]
 dependencies = [
-    "pefftacular>=0.4,<2",
-    "peptacular>=4.0,<5",
+    "pefftacular>=1.0,<2",
+    "peptacular>=4.2,<5",
     "polars>=1.0",
     "pydantic>=2.0",
     "tomli-w>=1.0",
     "tqdm>=4.67.3",
-    "psimodpy>=0.2,<2",
-    "unimodpy>=0.2,<2",
+    "psimodpy>=1.0,<2",
+    "unimodpy>=1.0,<2",
 ]
 authors = [
     { name = "Patrick Garrett", email = "pgarrett@scripps.edu" }
