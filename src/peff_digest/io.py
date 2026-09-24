@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
+import warnings
 from collections import Counter
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import IO, cast
 
 import pefftacular as pf
 import peptacular as pt
@@ -118,16 +122,77 @@ def read_sequences(path: str) -> tuple[list[pf.SequenceEntry], int]:
                 n_malformed += 1
                 logger.warning("Skipping malformed FASTA entry: %s", header.split()[0] if header else "<unknown>")
     else:
-        reader = iter(pf.PeffReader(path))
-        while True:
-            try:
-                sequences.append(next(reader))
-            except StopIteration:
-                break
-            except Exception:
-                n_malformed += 1
-                logger.warning("Skipping malformed PEFF entry at position %d", len(sequences) + n_malformed)
+        n_malformed = _read_peff(path, sequences)
     return sequences, n_malformed
+
+
+class _LineFeed:
+    """Line iterator that remembers the last line handed out and whether the source ran dry."""
+
+    def __init__(self, lines: Iterator[str]) -> None:
+        self._lines = lines
+        self.last: str | None = None
+        self.exhausted = False
+
+    def __iter__(self) -> Iterator[str]:
+        for line in self._lines:
+            self.last = line
+            yield line
+        self.exhausted = True
+
+
+def _read_peff(path: str, sequences: list[pf.SequenceEntry]) -> int:
+    """Append every parseable PEFF entry in *path* to *sequences*; return the number skipped.
+
+    ``PeffReader`` iteration is a generator, so it cannot continue after an entry fails to
+    parse. When that happens the failing entry is dropped and a fresh reader resumes at the
+    next ``>`` line, fed the same header. A resumed reader's header warnings (already shown
+    once) and its ``NumberOfEntries`` count mismatch are silenced. Header errors propagate.
+    """
+    n_malformed = 0
+    with Path(path).open(encoding="utf-8-sig") as fh:
+        lines: Iterator[str] = iter(fh)
+        header: list[str] = []
+        first_entry: str | None = None
+        n_stray = 0
+        for line in lines:
+            if line.startswith(">"):
+                first_entry = line
+                break
+            text = line.rstrip("\r\n")
+            if text.startswith("# ") or text == "#" or not text.strip():
+                header.append(line)
+            else:
+                n_stray += 1  # sequence text before the first '>' belongs to no entry
+        if n_stray:
+            n_malformed += 1
+            logger.warning("Skipping %d line(s) of text before the first PEFF entry", n_stray)
+        pending: Iterator[str] = itertools.chain([first_entry], lines) if first_entry is not None else iter(())
+        resumed = False
+        while True:
+            feed = _LineFeed(pending)
+            with pf.PeffReader(cast("IO[str]", itertools.chain(header, feed))) as reader:
+                with warnings.catch_warnings():
+                    if resumed:
+                        warnings.simplefilter("ignore", pf.PeffWarning)
+                    _ = reader.header  # a header error is fatal: let it propagate
+                with warnings.catch_warnings():
+                    if resumed:
+                        warnings.filterwarnings("ignore", r"Database .*NumberOfEntries=", pf.PeffWarning)
+                    try:
+                        for entry in reader:
+                            sequences.append(entry)
+                        return n_malformed
+                    except Exception as err:
+                        n_malformed += 1
+                        logger.warning(
+                            "Skipping malformed PEFF entry at position %d: %s", len(sequences) + n_malformed, err
+                        )
+            # The reader fails on an entry when it reads the next '>' line, or at end of file.
+            if feed.exhausted or feed.last is None or not feed.last.startswith(">"):
+                return n_malformed
+            pending = itertools.chain([feed.last], lines)
+            resumed = True
 
 
 # ---------------------------------------------------------------------------
@@ -226,10 +291,10 @@ def _digest_worker(
 
 
 def _digest_batch_worker(
-    batch: list[pf.SequenceEntry],
+    batch: Sequence[pf.SequenceEntry],
     config: DigestConfig,
-) -> list[tuple[str, str, str | None, int, float | None]]:
-    rows = []
+) -> list[_Row]:
+    rows: list[_Row] = []
     for sequence in batch:
         rows.extend(_digest_worker(sequence, config))
     return rows

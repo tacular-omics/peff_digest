@@ -162,7 +162,7 @@ def _mods_in_span(
             tag = f"M:{mod.name}" if use_mod_names else mod.accession
 
             if psi_db is not None:
-                entry = psi_db.get_by_id(mod.accession)
+                entry = _psi_get_by_id(psi_db, mod.accession)
                 if entry is not None:
                     # Validate: origin residue must match the (possibly mutated) residue.
                     origin = entry.origin
@@ -288,6 +288,17 @@ def _yield_user_mod_variants(
 # ---------------------------------------------------------------------------
 
 
+def _psi_get_by_id(psi_db: PsiModDatabase, accession: str) -> psimodpy.PsiModEntry | None:
+    """Look up a PSI-MOD accession, returning None when it is unknown or malformed.
+
+    psimodpy < 1.0 raises ValueError for a malformed accession; 1.0 returns None.
+    """
+    try:
+        return psi_db.get_by_id(accession)
+    except ValueError:
+        return None
+
+
 def _try_convert_psimod_to_unimod(
     ann: pt.ProFormaAnnotation,
     psi_db: PsiModDatabase,
@@ -302,7 +313,7 @@ def _try_convert_psimod_to_unimod(
     new_mod_map: dict[int, str] = {}
     for pos, tag in mod_map.items():
         if tag.startswith("MOD:"):
-            psi_entry = psi_db.get_by_id(tag)
+            psi_entry = _psi_get_by_id(psi_db, tag)
             if psi_entry is None or not psi_entry.xref_unimod:
                 return None
             try:
