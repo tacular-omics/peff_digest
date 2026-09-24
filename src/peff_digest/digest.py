@@ -299,6 +299,14 @@ def _psi_get_by_id(psi_db: PsiModDatabase, accession: str) -> psimodpy.PsiModEnt
         return None
 
 
+def _unimod_id_from_xref(xref: str) -> int | None:
+    """Parse a PSI-MOD Unimod xref ("Unimod:21", "Unimod:21#S") to its integer id."""
+    try:
+        return int(xref.replace("Unimod:", "").split("#")[0])
+    except ValueError:
+        return None
+
+
 def _try_convert_psimod_to_unimod(
     ann: pt.ProFormaAnnotation,
     psi_db: PsiModDatabase,
@@ -316,11 +324,8 @@ def _try_convert_psimod_to_unimod(
             psi_entry = _psi_get_by_id(psi_db, tag)
             if psi_entry is None or not psi_entry.xref_unimod:
                 return None
-            try:
-                unimod_id = int(psi_entry.xref_unimod.replace("Unimod:", "").split("#")[0])
-            except ValueError:
-                return None
-            if uni_db.get_by_id(unimod_id) is None:
+            unimod_id = _unimod_id_from_xref(psi_entry.xref_unimod)
+            if unimod_id is None or uni_db.get_by_id(unimod_id) is None:
                 return None
             new_mod_map[pos] = f"UNIMOD:{unimod_id}"
         elif tag.startswith("M:"):
@@ -328,7 +333,8 @@ def _try_convert_psimod_to_unimod(
             psi_entry = psi_db.get_by_name(name)
             if psi_entry is None or not psi_entry.xref_unimod:
                 return None
-            uni_entry = uni_db.get_by_id(psi_entry.xref_unimod)
+            unimod_id = _unimod_id_from_xref(psi_entry.xref_unimod)
+            uni_entry = None if unimod_id is None else uni_db.get_by_id(unimod_id)
             if uni_entry is None:
                 return None
             new_mod_map[pos] = f"U:{uni_entry.name}"
