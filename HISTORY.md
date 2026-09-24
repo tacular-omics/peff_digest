@@ -1,5 +1,14 @@
 # History
 
+## Unreleased
+
+* Requires `peptacular>=5.0,<6` and now lists `tacular>=2.0,<3` directly. peptacular 5
+  no longer re-exports `AA_LOOKUP`; the residue masses come from `tacular.AA_LOOKUP`.
+  Masses are unchanged.
+* README: the single-entry example matches the current API (`DigestConfig`, a generator
+  of `Peptide`), opens `PeffReader` as a context manager, and the full-digest example
+  uses `input_file=`.
+
 ## 0.2.0 (2026-09-23)
 
 * Requires the 1.0 releases of the PEFF and modification libraries:
