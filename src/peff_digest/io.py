@@ -12,6 +12,7 @@ from typing import IO, cast
 
 import pefftacular as pf
 import peptacular as pt
+import tacular
 from psimodpy import PsiModDatabase
 
 from peff_digest.config import DigestConfig
@@ -20,7 +21,7 @@ from peff_digest.digest import ann_to_map, digest_peff_sequence
 logger = logging.getLogger(__name__)
 
 AA_RESIDUE_MASSES: dict[str, float] = {
-    aa: m for aa in "ACDEFGHIKLMNPQRSTVWY" if (m := pt.AA_LOOKUP[aa].monoisotopic_mass) is not None
+    aa: m for aa in "ACDEFGHIKLMNPQRSTVWY" if (m := tacular.AA_LOOKUP[aa].monoisotopic_mass) is not None
 }
 
 

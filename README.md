@@ -143,7 +143,7 @@ annotate_variants = true
 from peff_digest import DigestConfig, InternalMod, TerminalMod, digest
 
 config = DigestConfig(
-    peff_file="human.peff",
+    input_file="human.peff",
     missed_cleavages=2,
     min_length=7,
     max_length=40,
@@ -169,12 +169,12 @@ Returns a `polars.DataFrame` with columns `protein_id`, `sequence`, `variant`, `
 
 ```python
 import pefftacular as pf
-from peff_digest import InternalMod, TerminalMod, digest_peff_sequence
+from peff_digest import DigestConfig, InternalMod, TerminalMod, digest_peff_sequence
 
-entry = next(iter(pf.PeffReader("human.peff")))
+with pf.PeffReader("human.peff") as reader:
+    entry = next(iter(reader))
 
-peptides = digest_peff_sequence(
-    entry,
+config = DigestConfig(
     cleave_on="KR",
     missed_cleavages=2,
     min_length=7,
@@ -191,11 +191,15 @@ peptides = digest_peff_sequence(
     ],
 )
 
-for peptide in peptides:
-    print(str(peptide), len(peptide), peptide.mass())
+for peptide in digest_peff_sequence(entry, config):
+    print(peptide.proforma.serialize(), peptide.sequence, peptide.mass)
 ```
 
-Returns a `set[peptacular.ProFormaAnnotation]`. Each element supports `len()`, `.mass()`, `str()`, and `.peptide_name` (PEFF variant notation, or `None` for canonical).
+Yields `Peptide` objects (a generator, each peptidoform once). Each has `.proforma` (a
+`peptacular.ProFormaAnnotation`), `.sequence`, `.mass`, `.mod_map`, `.missed_cleavages`,
+`.semi_enzymatic`, `.is_protein_nterm`/`.is_protein_cterm` and `.variant` (the applied PEFF
+variant, or `None` for canonical). `ProFormaAnnotation` is not hashable in peptacular 5, so
+key on `peptide.proforma.serialize()` to put peptides in a set or dict.
 
 ## Development
 
