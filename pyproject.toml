@@ -1,6 +1,6 @@
 [project]
 name = "peff_digest"
-version = "0.2.0"
+version = "0.3.0"
 description = "PEFF-aware in-silico protein digestion with PTM enumeration, sequence variants, and ProForma output."
 readme = "README.md"
 license = { text = "MIT" }

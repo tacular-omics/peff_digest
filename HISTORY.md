@@ -1,6 +1,6 @@
 # History
 
-## Unreleased
+## 0.3.0 (2026-11-14)
 
 * Requires `peptacular>=5.0,<6` and now lists `tacular>=2.0,<3` directly. peptacular 5
   no longer re-exports `AA_LOOKUP`; the residue masses come from `tacular.AA_LOOKUP`.
