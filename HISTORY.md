@@ -1,10 +1,13 @@
 # History
 
-## Unreleased
+## 0.3.0 (2026-11-14)
 
 * Requires `peptacular>=5.0,<6` and now lists `tacular>=2.0,<3` directly. peptacular 5
   no longer re-exports `AA_LOOKUP`; the residue masses come from `tacular.AA_LOOKUP`.
   Masses are unchanged.
+* The `pydantic` floor is raised to `>=2.9`: pydantic 2.0 cannot be installed on
+  Python 3.13, which this package declares as supported, because there is no wheel
+  for it and the pydantic-core 2.0.1 sdist fails to build there.
 * README: the single-entry example matches the current API (`DigestConfig`, a generator
   of `Peptide`), opens `PeffReader` as a context manager, and the full-digest example
   uses `input_file=`.
