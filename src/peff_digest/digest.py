@@ -2,9 +2,10 @@
 PEFF-aware protein digest.
 
 Produces all peptide ProFormaAnnotation variants from a PEFF SequenceEntry by:
-  1. Generating one sequence per variant (canonical + each VariantSimple/VariantComplex
-     applied independently — no combinations).
-  2. Digesting each variant sequence with the standard enzymatic rules.
+  1. Asking pefftacular for one sequence form per variant (the reference entry plus each
+     VariantSimple/VariantComplex applied independently — no combinations), via
+     ``SequenceEntry.apply_variants``.
+  2. Digesting each form's sequence with the standard enzymatic rules.
   3. For each peptide span, enumerating PEFF-annotated PTM combinations up to
      max_ptm_per_peptide (0 = no PEFF PTMs applied, only unmodified peptides returned).
 
@@ -59,78 +60,70 @@ def get_cut_sites(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Variant:
-    """A concrete protein sequence derived from one PEFF annotation event."""
+def _build_forms(peff_entry: pf.SequenceEntry, config: DigestConfig) -> list[pf.VariantForm]:
+    """Return the sequence forms to digest: the reference, then one per PEFF variant.
 
-    sequence: str
-    # Maps 1-based PEFF position → 0-based position in this variant's sequence.
-    # None means the position was deleted by a VariantComplex.
-    pos_map: dict[int, int | None]
-    source: pf.VariantSimple | pf.VariantComplex | None = None
-    source_orig: str = ""  # original AA(s) at the variant site
+    The variant arithmetic belongs to pefftacular (``SequenceEntry.apply_variants``, spec
+    §3.3.8 and §3.3.9): it builds the derived sequence, truncates before a ``*`` nonsense
+    substitution, and remaps or drops every other annotation onto the new coordinates.
+    Variants are applied one at a time and never combined, which is what
+    ``config.include_simple_variants`` and ``config.include_complex_variants`` select.
 
-
-def _canonical(sequence: str) -> _Variant:
-    return _Variant(sequence, {i + 1: i for i in range(len(sequence))})
-
-
-def _apply_simple(sequence: str, v: pf.VariantSimple) -> _Variant:
-    """Single AA substitution — sequence length is unchanged."""
-    pos0 = int(v.position) - 1  # 0-based
-    if pos0 < 0 or pos0 >= len(sequence):
-        return _canonical(sequence)  # out-of-range annotation → skip
-    new_seq = sequence[:pos0] + v.new_amino_acid + sequence[pos0 + 1 :]
-    pos_map: dict[int, int | None] = {i + 1: i for i in range(len(sequence))}
-    return _Variant(new_seq, pos_map, source=v, source_orig=sequence[pos0])
-
-
-def _apply_complex(sequence: str, v: pf.VariantComplex) -> _Variant:
-    """Multi-residue variant — sequence length may change."""
-    start0 = int(v.start_pos) - 1  # 0-based inclusive
-    end0 = int(v.end_pos)  # 0-based exclusive  (PEFF end is 1-based inclusive)
-    if start0 < 0 or end0 > len(sequence) or start0 > end0:
-        return _canonical(sequence)  # out-of-range annotation → skip
-
-    orig_seq = sequence[start0:end0]
-    new_seq = sequence[:start0] + v.new_sequence + sequence[end0:]
-    delta = len(v.new_sequence) - (end0 - start0)
-
-    pos_map: dict[int, int | None] = {}
-    for peff_pos in range(1, len(sequence) + 1):
-        orig0 = peff_pos - 1
-        if orig0 < start0:
-            pos_map[peff_pos] = orig0
-        elif orig0 < end0:
-            pos_map[peff_pos] = None  # consumed by the variant
-        else:
-            pos_map[peff_pos] = orig0 + delta
-
-    return _Variant(new_seq, pos_map, source=v, source_orig=orig_seq)
+    A variant the library cannot apply — a non-numeric position, one outside the sequence —
+    is skipped through ``errors="skip"`` rather than digested as a second copy of the
+    reference sequence.
+    """
+    forms: list[pf.VariantForm] = [peff_entry.apply_variants()]
+    chosen: list[pf.VariantSimple | pf.VariantComplex] = []
+    if config.include_simple_variants:
+        chosen.extend(peff_entry.variant_simple)
+    if config.include_complex_variants:
+        chosen.extend(peff_entry.variant_complex)
+    for v in chosen:
+        form = peff_entry.apply_variants([v], errors="skip")
+        if form is not None:
+            forms.append(form)
+    return forms
 
 
-def _variant_in_span(variant: _Variant, pep_start: int, pep_end: int) -> bool:
-    """Return True if the variant's mutation site overlaps the peptide span [pep_start, pep_end)."""
-    if variant.source is None:
-        return False
-    if isinstance(variant.source, pf.VariantSimple):
-        mapped = variant.pos_map.get(int(variant.source.position))
+def _variant_site(form: pf.VariantForm) -> tuple[int, int] | None:
+    """The half-open 0-based span the applied variant occupies in ``form.sequence``.
+
+    ``None`` for the reference form, or for a variant whose residue the form no longer
+    holds. A ``*`` nonsense substitution removes the residue itself, so its site is the
+    form's new C-terminus: the truncation is what a peptide there carries.
+    """
+    if not form.applied:
+        return None
+    pos_map = form.position_map
+    if form.truncated_at is not None:
+        end = len(form.sequence)
+        return (max(end - 1, 0), end)
+    v = form.applied[0]
+    if isinstance(v, pf.VariantSimple):
+        pos = int(v.position)
+        mapped = pos_map[pos] if 0 < pos < len(pos_map) else None
         if mapped is None:
-            return False
-        return pep_start <= mapped < pep_end
-    # VariantComplex: the new sequence occupies [start0, start0+len(new_sequence))
-    v = variant.source
-    start0 = int(v.start_pos) - 1
-    new_len = len(v.new_sequence)
-    # After complex variant, the inserted region sits at [start0, start0+new_len)
-    # in the variant sequence. Check overlap with peptide span.
-    var_end = start0 + new_len
-    return pep_start < var_end and start0 < pep_end
+            return None
+        return (mapped - 1, mapped)
+    start = int(v.start_pos)
+    prev = pos_map[start - 1] if 1 < start < len(pos_map) else 0
+    start0 = prev if prev is not None else 0
+    return (start0, start0 + len(v.new_sequence))
+
+
+def _variant_in_span(form: pf.VariantForm, pep_start: int, pep_end: int) -> bool:
+    """Return True if the applied variant's site overlaps the peptide span [pep_start, pep_end)."""
+    site = _variant_site(form)
+    if site is None:
+        return False
+    site_start, site_end = site
+    return pep_start < site_end and site_start < pep_end
 
 
 def _mods_in_span(
-    variant: _Variant,
-    span_start: int,  # 0-based in variant.sequence
+    sequence: str,
+    span_start: int,  # 0-based in sequence
     span_end: int,  # 0-based exclusive
     mod_entries: list[pf.ModResPsi | pf.ModResUnimod],
     use_mod_names: bool = False,
@@ -139,9 +132,13 @@ def _mods_in_span(
 ) -> list[tuple[int, str]]:
     """Return (0-based peptide-local position, ProForma tag) for each PEFF mod in the span.
 
+    *mod_entries* belong to the form being digested, so their positions are already in
+    *sequence*\'s coordinates: pefftacular remapped them when it applied the variant and
+    dropped the sites the variant removed or substituted (spec §3.3.10).
+
     When *psi_db* is provided each mod is looked up to:
-    - Validate the origin residue against the (possibly variant-mutated) sequence.
-      Mods whose origin does not match the current residue are silently dropped.
+    - Validate the origin residue against the residue the sequence actually holds.
+      Mods whose origin does not match are silently dropped.
     - Promote terminus-specific mods (TermSpec.N_TERM / C_TERM) to the appropriate
       terminal sentinel position (_NTERM_POS / _CTERM_POS) when the mod sits at the
       protein terminus and the peptide spans that terminus.
@@ -153,9 +150,9 @@ def _mods_in_span(
                 peff_pos_int = int(peff_pos)
             except (ValueError, TypeError):
                 continue  # skip unknown positions (e.g. '?')
-            local0 = variant.pos_map.get(peff_pos_int)
-            if local0 is None:
-                continue
+            local0 = peff_pos_int - 1
+            if not 0 <= local0 < len(sequence):
+                continue  # an annotation outside this form's sequence
             pep_local = local0 - span_start
             if not (0 <= pep_local < (span_end - span_start)):
                 continue
@@ -167,8 +164,8 @@ def _mods_in_span(
                     # Validate: origin residue must match the (possibly mutated) residue.
                     origin = entry.origin
                     if isinstance(origin, AminoAcid) and origin != AminoAcid.ANY:
-                        if variant.sequence[local0] != str(origin):
-                            continue  # residue changed by variant — drop this mod
+                        if sequence[local0] != str(origin):
+                            continue  # the annotation disagrees with the sequence
 
                     # Terminal promotion: convert positional mod to terminal sentinel.
                     # If a mod is terminal-specific but the conditions aren't met, drop it —
@@ -420,19 +417,8 @@ def digest_peff_sequence(
             else:
                 variable_mods.setdefault(aa, []).append(m.modification)
 
-    # Collect all PEFF mod annotations (PSI-MOD)
-    all_mods: list[pf.ModResPsi | pf.ModResUnimod] = []
-    if config.use_psi_mods:
-        all_mods.extend(peff_entry.mod_res_psi)
-
-    # One variant per PEFF event (canonical + each simple/complex independently)
-    variants: list[_Variant] = [_canonical(sequence)]
-    if config.include_simple_variants:
-        for v in peff_entry.variant_simple:
-            variants.append(_apply_simple(sequence, v))
-    if config.include_complex_variants:
-        for v in peff_entry.variant_complex:
-            variants.append(_apply_complex(sequence, v))
+    # One form per PEFF event (the reference, then each simple/complex independently)
+    forms = _build_forms(peff_entry, config)
 
     max_ptm_per_peptide = config.max_ptm_per_peptide
     use_mod_names = config.use_mod_names
@@ -441,9 +427,14 @@ def digest_peff_sequence(
 
     seen: set[str] = set()
 
-    for variant in variants:
-        vseq = variant.sequence
+    for form in forms:
+        vseq = form.sequence
         seq_len = len(vseq)
+
+        # pefftacular already remapped these onto this form's coordinates.
+        form_mods: list[pf.ModResPsi | pf.ModResUnimod] = []
+        if config.use_psi_mods:
+            form_mods.extend(form.entry.mod_res_psi)
 
         cut_sites = get_cut_sites(vseq, cleave_on, restrict_after, restrict_before, config.cterminal)
         n_cuts = len(cut_sites)
@@ -454,7 +445,8 @@ def digest_peff_sequence(
             mc: int,
             is_semi: bool,
             _vseq: str = vseq,
-            _variant: _Variant = variant,
+            _form: pf.VariantForm = form,
+            _mods: list[pf.ModResPsi | pf.ModResUnimod] = form_mods,
             _seq_len: int = seq_len,
         ) -> list[Peptide]:
             length = end - start
@@ -466,11 +458,11 @@ def digest_peff_sequence(
 
             # ----------------------------------------------------------------
             # Phase 1: PEFF mods only
-            # When psi_db is provided, _mods_in_span validates each mod against
-            # the (possibly variant-mutated) residue and promotes terminus-specific
-            # mods to terminal sentinels.
+            # When psi_db is provided, _mods_in_span validates each mod against the
+            # residue this form holds and promotes terminus-specific mods to terminal
+            # sentinels.
             # ----------------------------------------------------------------
-            peff_applicable = _mods_in_span(_variant, start, end, all_mods, use_mod_names, psi_db, _seq_len)
+            peff_applicable = _mods_in_span(_vseq, start, end, _mods, use_mod_names, psi_db, _seq_len)
 
             # Compute fixed-mod positions; when override mode is on, drop PEFF mods there.
             fixed_positions: set[int] = set()
@@ -479,11 +471,11 @@ def digest_peff_sequence(
                 if config.fixed_mod_overrides_peff:
                     peff_applicable = [(pos, tag) for pos, tag in peff_applicable if pos not in fixed_positions]
 
-            span_variant = _variant.source if _variant_in_span(_variant, start, end) else None
+            span_variant = _form.applied[0] if (_form.applied and _variant_in_span(_form, start, end)) else None
             try:
                 peff_variants = _yield_mod_variants(pep_seq, peff_applicable, max_ptm_per_peptide)
             except ValueError:
-                return []  # unparseable sequence (e.g. contains '*' or spaces) — skip span
+                return []  # unparseable sequence (e.g. contains spaces) — skip span
 
             # ----------------------------------------------------------------
             # Build user variable mod candidates once for this span.

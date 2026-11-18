@@ -6,12 +6,17 @@ from conftest import _cfg, _make_entry
 
 from peff_digest import digest_peff_sequence
 from peff_digest.digest import (
-    _apply_complex,
-    _apply_simple,
     _mods_in_span,
     _variant_in_span,
     _yield_mod_variants,
 )
+
+
+def _form(sequence: str, variant: pf.VariantSimple | pf.VariantComplex) -> pf.VariantForm:
+    """The form pefftacular builds for *variant*, which is what the digest now walks."""
+    key = "variant_simple" if isinstance(variant, pf.VariantSimple) else "variant_complex"
+    entry = _make_entry(sequence, **{key: (variant,)})
+    return entry.apply_variants([variant])
 
 
 def test_variant_simple_produces_substituted_peptide() -> None:
@@ -194,74 +199,127 @@ def test_variant_field_set_for_complex_deletion_in_span() -> None:
 
 def test_variant_in_span_deletion_overlaps() -> None:
     """Deletion at positions 3-5 (1-based) should be detected in span that contains the site."""
-    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
-    assert _variant_in_span(v, 0, 3)
+    f = _form("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert f.sequence == "AAKR"
+    assert _variant_in_span(f, 0, 3)
 
 
 def test_variant_in_span_deletion_outside() -> None:
     """Deletion should NOT be detected in a span that doesn't contain the site."""
-    v = _apply_complex("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
-    assert not _variant_in_span(v, 3, 5)
+    f = _form("AABBBKR", pf.VariantComplex(start_pos=3, end_pos=5, new_sequence=""))
+    assert not _variant_in_span(f, 3, 5)
 
 
 def test_variant_in_span_complex_insertion() -> None:
     """Long insertion should properly detect span overlap."""
     # "AAKR": replace position 2 (1-based, 'A') with "MMMMM"
-    # → variant "AMMMMMKR". Inserted region: [1, 1+5) = [1, 6) in variant coords.
-    v = _apply_complex("AAKR", pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMMM"))
-    assert _variant_in_span(v, 0, 4)  # [0,4) overlaps [1,6)
-    assert not _variant_in_span(v, 0, 1)  # [0,1) does NOT overlap [1,6)
+    # → form "AMMMMMKR". Inserted region: [1, 1+5) = [1, 6) in form coordinates.
+    f = _form("AAKR", pf.VariantComplex(start_pos=2, end_pos=2, new_sequence="MMMMM"))
+    assert f.sequence == "AMMMMMKR"
+    assert _variant_in_span(f, 0, 4)  # [0,4) overlaps [1,6)
+    assert not _variant_in_span(f, 0, 1)  # [0,1) does NOT overlap [1,6)
 
 
 def test_variant_in_span_boundary_exact() -> None:
     """Variant at exact span boundary (end-exclusive) should not overlap."""
-    # Simple variant at position 4 (1-based) → 0-based mapped=3
-    # Span [0, 3) should NOT include position 3 (end-exclusive)
-    v = _apply_complex("AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X"))
-    # Inserted at start0=3, new_len=1, var_end=4. Span [0,3): 0 < 4 AND 3 < 3 → False
-    assert not _variant_in_span(v, 0, 3)
+    f = _form("AAABKR", pf.VariantComplex(start_pos=4, end_pos=4, new_sequence="X"))
+    # Replaced slot sits at start0=3, new_len=1, so the site is [3, 4).
+    # Span [0,3): 0 < 4 AND 3 < 3 → False
+    assert not _variant_in_span(f, 0, 3)
     # Span [3, 6) should overlap: 3 < 4 AND 3 < 6 → True
-    assert _variant_in_span(v, 3, 6)
+    assert _variant_in_span(f, 3, 6)
 
 
 def test_variant_in_span_simple_mapped_none_returns_false() -> None:
-    """When pos_map maps the variant position to None the span check must return False."""
-    from peff_digest.digest import _Variant
+    """A position_map entry of None at the variant's position must give no overlap.
 
-    v = _Variant(
-        sequence="AAKR",
-        pos_map={1: 0, 2: None, 3: 2, 4: 3},
-        source=pf.VariantSimple(position=2, new_amino_acid="C"),
+    Built by hand: pefftacular never deletes a residue for a VariantSimple except through
+    a ``*`` stop, which ``truncated_at`` covers, so this guard has no natural input.
+    """
+    form = pf.VariantForm(
+        entry=_make_entry("AAKR"),
+        applied=(pf.VariantSimple(position=2, new_amino_acid="C"),),
+        position_map=(None, 1, None, 3, 4),
     )
-    assert not _variant_in_span(v, 0, 4)
+    assert not _variant_in_span(form, 0, 4)
 
 
-def test_apply_simple_out_of_range_returns_canonical() -> None:
-    """A position beyond sequence length must fall back to the canonical variant."""
+def test_simple_variant_out_of_range_is_skipped() -> None:
+    """A position beyond the sequence yields no extra form, so no extra peptide."""
     v = pf.VariantSimple(position=99, new_amino_acid="C")
-    result = _apply_simple("AAK", v)
+    entry = _make_entry("AAAKBBBR", variant_simple=(v,))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
 
-    assert result.source is None
-    assert result.sequence == "AAK"
-    assert result.pos_map == {1: 0, 2: 1, 3: 2}
+    assert {p.sequence for p in result} == {"AAAK", "BBBR"}
+    assert all(p.variant is None for p in result)
 
 
-def test_apply_complex_out_of_range_returns_canonical() -> None:
-    """start > end or end beyond sequence length must fall back to the canonical variant."""
+def test_complex_variant_out_of_range_is_skipped() -> None:
+    """start/end beyond the sequence yields no extra form, so no extra peptide."""
     v = pf.VariantComplex(start_pos=10, end_pos=20, new_sequence="DD")
-    result = _apply_complex("AAK", v)
+    entry = _make_entry("AAAKBBBR", variant_complex=(v,))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
 
-    assert result.source is None
-    assert result.sequence == "AAK"
+    assert {p.sequence for p in result} == {"AAAK", "BBBR"}
+    assert all(p.variant is None for p in result)
+
+
+def test_non_numeric_variant_position_is_skipped() -> None:
+    """A '?' position cannot locate a variant, so it contributes no form."""
+    v = pf.VariantSimple(position="?", new_amino_acid="C")
+    entry = _make_entry("AAAKBBBR", variant_simple=(v,))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+
+    assert {p.sequence for p in result} == {"AAAK", "BBBR"}
+
+
+def test_nonsense_variant_truncates_and_drops_downstream_peptides() -> None:
+    """A '*' substitution ends the protein (spec 3.3.8): nothing downstream survives.
+
+    The reference form still yields the whole protein's peptides. The variant form is the
+    sequence truncated before the stop, so its only new peptide is the one ending at the
+    new C-terminus, and it carries the variant.
+    """
+    # Stop at position 7, inside the peptide "BBBBR", so the truncated form is "AAAKBB".
+    v = pf.VariantSimple(position=7, new_amino_acid="*")
+    entry = _make_entry("AAAKBBBBRCCCK", variant_simple=(v,))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR")))
+
+    by_seq = {p.sequence: p for p in result}
+    assert set(by_seq) == {"AAAK", "BBBBR", "CCCK", "BB"}
+    # "BB" is the truncated form's new C-terminal peptide and carries the variant.
+    assert by_seq["BB"].variant is v
+    # The reference form's peptides are unaffected and unattributed.
+    assert by_seq["BBBBR"].variant is None
+    assert by_seq["CCCK"].variant is None
+    # No peptide anywhere contains the stop character.
+    assert all("*" not in p.sequence for p in result)
+
+
+def test_mod_on_substituted_residue_is_dropped() -> None:
+    """Spec 3.3.10: a modification on a residue a variant substituted does not carry over."""
+    v = pf.VariantSimple(position=2, new_amino_acid="G")
+    mod = pf.ModResPsi(positions=(2,), accession="MOD:00696", name="phosphorylated residue")
+    entry = _make_entry("ASAKBBBR", variant_simple=(v,), mod_res_psi=(mod,))
+    result = list(digest_peff_sequence(entry, _cfg(cleave_on="KR", max_ptm_per_peptide=1)))
+
+    variant_peptides = [p for p in result if p.variant is not None]
+    assert variant_peptides, "the variant form must still produce a peptide"
+    assert all("MOD:00696" not in str(p.proforma) for p in variant_peptides)
 
 
 def test_mods_in_span_skips_unknown_position() -> None:
     """A ModResPsi with position '?' must be silently skipped."""
-    from peff_digest.digest import _canonical
-
-    variant = _canonical("ACDEFGR")
     mod = pf.ModResPsi(positions=("?",), accession="MOD:00696", name="phosphorylated residue")
-    result = _mods_in_span(variant, 0, 7, [mod])
+    result = _mods_in_span("ACDEFGR", 0, 7, [mod])
+
+    assert result == []
+
+
+def test_mods_in_span_skips_position_outside_sequence() -> None:
+    """An annotation position past the end of this form's sequence is dropped, not indexed."""
+    mod = pf.ModResPsi(positions=(681,), accession="MOD:00696", name="phosphorylated residue")
+    result = _mods_in_span("ACDEFGR", 0, 7, [mod])
 
     assert result == []
 

@@ -2,7 +2,7 @@
 
 A PEFF-aware protein digest tool. Given a PEFF file and enzymatic digestion parameters, produces a CSV of peptides with their sequence (ProForma notation), variant annotation, length, and monoisotopic mass.
 
-Each PEFF `VariantSimple` and `VariantComplex` annotation is applied independently (not combined). PEFF PTMs (`ModResPsi` / `ModResUnimod`) are applied combinatorially up to a configurable limit per peptide. Fixed and variable user-defined modifications — including terminal modifications — are also supported.
+Each PEFF `VariantSimple` and `VariantComplex` annotation is applied independently (not combined) by pefftacular's `SequenceEntry.apply_variants`, which also truncates the sequence before a `*` nonsense substitution (spec §3.3.8), so no peptide spans or follows a stop. PEFF PTMs (`ModResPsi` / `ModResUnimod`) are applied combinatorially up to a configurable limit per peptide. Fixed and variable user-defined modifications — including terminal modifications — are also supported.
 
 ## Installation
 
