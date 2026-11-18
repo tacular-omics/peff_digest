@@ -9,15 +9,18 @@
   `_mods_in_span` are gone; cut sites, missed cleavages, semi-enzymatic spans, PTM
   combinatorics, PSI-MOD origin validation, terminal promotion and ProForma output are
   unchanged. The public API, the CLI and every output column stay as they were.
-* Fixed: a `\VariantSimple` whose new residue is `*` is a nonsense mutation that ends the
-  protein (spec §3.3.8), and that form is now the sequence truncated before the stop. The
-  peptide ending at the new C-terminus is reported, carrying the variant; before, the `*`
-  was spliced into a full-length sequence, the span containing it was dropped as
-  unparseable, and the positions after the stop were digested as though the protein
-  continued. Measured on `tests/data/UniProtExport_3prot.peff`, which has ten such
-  variants: 17 peptides are added under the default settings and none are removed, because
-  the old downstream peptides were duplicates of the reference form's and were already
-  being deduplicated away.
+* **Changed, and it is an interpretation rather than a conformance fix — Ty to decide.** A
+  `\VariantSimple` whose new residue is `*` now gives a form truncated before the stop,
+  because that is what pefftacular 1.4.1's `apply_variants` does and this package now calls
+  it. PEFF 1.0 §3.3.8 requires only that "The asterisk is to be interpreted as a nonsense
+  mutation (stop codon) over which a peptide sequence MUST NOT span", which 0.3.0 already
+  satisfied; §3.2's amino acid table glosses `*` as "Sequence interruption (stop codon,
+  unknown linkage)", which reads against truncation. The specification does not settle it.
+  Who sees a difference: anyone digesting a file with a `*` variant. Measured on
+  `tests/data/UniProtExport_3prot.peff` (a UniProt export with ten such annotations),
+  17 peptides are added under the default settings and 38 with semi-enzymatic spans, none
+  removed; each addition is the peptide ending at the new C-terminus, carrying the variant.
+  No fallback or switch for the old behaviour has been added.
 * A modification on a residue a variant substituted is now dropped by the library (spec
   §3.3.10) as well as by this package's PSI-MOD origin check. On the repository's test
   files the two rules agree and no output changes; they can differ only for a modification

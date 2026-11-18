@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pefftacular as pf
 import pytest
-from conftest import _cfg, _make_entry
+from conftest import DATA_DIR, _cfg, _make_entry
 
 from peff_digest import digest_peff_sequence
+from peff_digest.io import read_sequences
 from peff_digest.digest import (
     _mods_in_span,
     _variant_in_span,
@@ -322,6 +323,89 @@ def test_mods_in_span_skips_position_outside_sequence() -> None:
     result = _mods_in_span("ACDEFGR", 0, 7, [mod])
 
     assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Nonsense (asterisk) variants, against values from outside this workspace.
+#
+# The file: tests/data/UniProtExport_3prot.peff is a UniProt PEFF export, as its own
+# header states - "# DbName=UniProt", "# DbSource=https://www.uniprot.org",
+# "# DbVersion=2018_02". Its ten asterisk annotations and their provenance tags
+# ("[ESP][ExAC]", "cosmic curated") are UniProt's values, not ours.
+#
+# The residue values: UniProt P21802 (FGFR2_HUMAN), fetched 2026-11-17 from
+# https://rest.uniprot.org/uniprotkb/P21802.fasta
+#   >sp|P21802|FGFR2_HUMAN Fibroblast growth factor receptor 2 OS=Homo sapiens OX=9606
+#   GN=FGFR2 PE=1 SV=1
+# 821 amino acids; residue 117 is T and residue 118 is W (1-based).
+#
+# Nothing asserted below was produced by peff_digest.
+# ---------------------------------------------------------------------------
+
+UNIPROT_P21802_LENGTH = 821  # UniProt, see above
+UNIPROT_P21802_RESIDUE_117 = "T"  # UniProt, see above
+UNIPROT_P21802_RESIDUE_118 = "W"  # UniProt, see above; the residue (118|*) replaces
+# The nine asterisk positions the UniProt export annotates on P21802:
+UNIPROT_EXPORT_P21802_STOP_POSITIONS = [118, 156, 212, 251, 290, 465, 474, 636, 769]
+
+
+def _uniprot_export_p21802() -> pf.SequenceEntry:
+    entries, _ = read_sequences(str(DATA_DIR / "UniProtExport_3prot.peff"))
+    return next(e for e in entries if e.db_unique_id == "P21802")
+
+
+def test_uniprot_export_fixture_still_matches_uniprot() -> None:
+    """Anchor the fixture to the vendor, so the two tests below rest on UniProt's values.
+
+    Expected values are from UniProt (see the comment block above), not from peff_digest.
+    """
+    entry = _uniprot_export_p21802()
+    assert len(entry.sequence) == UNIPROT_P21802_LENGTH
+    assert entry.sequence[116] == UNIPROT_P21802_RESIDUE_117
+    assert entry.sequence[117] == UNIPROT_P21802_RESIDUE_118
+    stops = sorted(int(v.position) for v in entry.variant_simple if v.new_amino_acid == "*")
+    assert stops == UNIPROT_EXPORT_P21802_STOP_POSITIONS
+
+
+def test_no_peptide_spans_a_nonsense_stop() -> None:
+    """The specification's only normative requirement for an asterisk variant.
+
+    PEFF 1.0 section 3.3.8, verbatim: "The asterisk is to be interpreted as a nonsense
+    mutation (stop codon) over which a peptide sequence MUST NOT span."
+    (PEFF_SpecDoc_1.0_FINAL.pdf, April 5 2019, http://psidev.info/peff)
+
+    This holds both before and after the port to pefftacular's apply_variants; it is not
+    what the port changed. See test_stop_variant_truncation_is_an_interpretation.
+    """
+    entry = _uniprot_export_p21802()
+    peptides = list(digest_peff_sequence(entry, _cfg(cleave_on="KR", min_length=7, max_length=40, missed_cleavages=2)))
+    assert peptides, "the fixture must produce peptides at all"
+    assert all("*" not in p.sequence for p in peptides)
+    assert all("*" not in str(p.proforma) for p in peptides)
+
+
+def test_stop_variant_truncation_is_an_interpretation() -> None:
+    """NOT a specification requirement. This pins an interpretation so a change is visible.
+
+    PEFF 1.0 section 3.3.8 requires only that no peptide span the asterisk
+    (test_no_peptide_spans_a_nonsense_stop). It does not say the residues after the stop
+    are absent from that form, and section 3.2's amino acid table glosses "*" as
+    "Sequence interruption (stop codon, unknown linkage)", which reads the other way.
+    Treating the form as truncated before the stop is the reading pefftacular 1.4.1
+    implements and that this package now inherits by calling it.
+
+    The expected residue is UniProt's: P21802 residue 117 is T, and the form built from
+    (118|*) therefore ends in T.
+    """
+    entry = _uniprot_export_p21802()
+    stop_118 = next(v for v in entry.variant_simple if v.new_amino_acid == "*" and int(v.position) == 118)
+    peptides = list(digest_peff_sequence(entry, _cfg(cleave_on="KR", min_length=7, max_length=40, missed_cleavages=2)))
+    carrying = [p for p in peptides if p.variant is stop_118]
+
+    assert carrying, "the (118|*) form must contribute a peptide ending at the stop"
+    for p in carrying:
+        assert p.sequence.endswith(UNIPROT_P21802_RESIDUE_117)
+        assert p.is_protein_cterm, "it is the C-terminal peptide of the truncated form"
 
 
 def test_yield_mod_variants_skips_duplicate_position_combos() -> None:
