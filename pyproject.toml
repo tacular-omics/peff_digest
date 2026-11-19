@@ -7,7 +7,7 @@ license = { text = "MIT" }
 requires-python = ">=3.12"
 keywords = ["proteomics", "PEFF", "peptide", "digestion", "PTM", "ProForma", "bioinformatics"]
 dependencies = [
-    "pefftacular>=1.0,<2",
+    "pefftacular>=1.4.1,<2",
     "peptacular>=5.0,<6",
     "tacular>=2.0,<3",
     "polars>=1.0",

@@ -1,5 +1,35 @@
 # History
 
+## Unreleased
+
+* The variant arithmetic now comes from pefftacular rather than from a private copy here.
+  `SequenceEntry.apply_variants` (new in pefftacular 1.4.0, corrected in 1.4.1) builds each
+  sequence form, so the floor is raised to `pefftacular>=1.4.1,<2`. `_Variant`,
+  `_canonical`, `_apply_simple`, `_apply_complex` and the position-mapping half of
+  `_mods_in_span` are gone; cut sites, missed cleavages, semi-enzymatic spans, PTM
+  combinatorics, PSI-MOD origin validation, terminal promotion and ProForma output are
+  unchanged. The public API, the CLI and every output column stay as they were.
+* **Changed, by decision of 2026-11-18, not because the specification requires it.** A
+  `\VariantSimple` whose new residue is `*` now drops everything after the stop, so that
+  form is the sequence truncated before it. PEFF 1.0 does not settle this: §3.3.8 requires
+  only that "The asterisk is to be interpreted as a nonsense mutation (stop codon) over
+  which a peptide sequence MUST NOT span", which 0.3.0 already satisfied, while §3.2's
+  amino acid table glosses `*` as "Sequence interruption (stop codon, unknown linkage)",
+  which reads the other way. The chosen reading is that the stop ends the protein, which is
+  also pefftacular 1.4.1's behaviour and what this package inherits by calling its
+  `apply_variants`. Who sees a difference: anyone digesting a file with a `*` variant.
+  Measured on `tests/data/UniProtExport_3prot.peff` (a UniProt export with ten such
+  annotations), 17 peptides are added under the default settings and 38 with semi-enzymatic
+  spans, none removed; each addition is the peptide ending at the new C-terminus, carrying
+  the variant. No fallback or switch for the old behaviour has been added.
+* A modification on a residue a variant substituted is now dropped by the library (spec
+  §3.3.10) as well as by this package's PSI-MOD origin check. On the repository's test
+  files the two rules agree and no output changes; they can differ only for a modification
+  whose PSI-MOD origin is `ANY` or whose accession is not in the PSI-MOD database.
+* A variant that cannot be applied — a non-numeric position such as `?`, or one outside the
+  sequence — now contributes no form at all, instead of a second copy of the reference
+  sequence that the deduplication then absorbed. The output is unchanged.
+
 ## 0.3.0 (2026-11-14)
 
 * Requires `peptacular>=5.0,<6` and now lists `tacular>=2.0,<3` directly. peptacular 5
