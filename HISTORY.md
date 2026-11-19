@@ -9,18 +9,19 @@
   `_mods_in_span` are gone; cut sites, missed cleavages, semi-enzymatic spans, PTM
   combinatorics, PSI-MOD origin validation, terminal promotion and ProForma output are
   unchanged. The public API, the CLI and every output column stay as they were.
-* **Changed, and it is an interpretation rather than a conformance fix — Ty to decide.** A
-  `\VariantSimple` whose new residue is `*` now gives a form truncated before the stop,
-  because that is what pefftacular 1.4.1's `apply_variants` does and this package now calls
-  it. PEFF 1.0 §3.3.8 requires only that "The asterisk is to be interpreted as a nonsense
-  mutation (stop codon) over which a peptide sequence MUST NOT span", which 0.3.0 already
-  satisfied; §3.2's amino acid table glosses `*` as "Sequence interruption (stop codon,
-  unknown linkage)", which reads against truncation. The specification does not settle it.
-  Who sees a difference: anyone digesting a file with a `*` variant. Measured on
-  `tests/data/UniProtExport_3prot.peff` (a UniProt export with ten such annotations),
-  17 peptides are added under the default settings and 38 with semi-enzymatic spans, none
-  removed; each addition is the peptide ending at the new C-terminus, carrying the variant.
-  No fallback or switch for the old behaviour has been added.
+* **Changed, by decision of 2026-11-18, not because the specification requires it.** A
+  `\VariantSimple` whose new residue is `*` now drops everything after the stop, so that
+  form is the sequence truncated before it. PEFF 1.0 does not settle this: §3.3.8 requires
+  only that "The asterisk is to be interpreted as a nonsense mutation (stop codon) over
+  which a peptide sequence MUST NOT span", which 0.3.0 already satisfied, while §3.2's
+  amino acid table glosses `*` as "Sequence interruption (stop codon, unknown linkage)",
+  which reads the other way. The chosen reading is that the stop ends the protein, which is
+  also pefftacular 1.4.1's behaviour and what this package inherits by calling its
+  `apply_variants`. Who sees a difference: anyone digesting a file with a `*` variant.
+  Measured on `tests/data/UniProtExport_3prot.peff` (a UniProt export with ten such
+  annotations), 17 peptides are added under the default settings and 38 with semi-enzymatic
+  spans, none removed; each addition is the peptide ending at the new C-terminus, carrying
+  the variant. No fallback or switch for the old behaviour has been added.
 * A modification on a residue a variant substituted is now dropped by the library (spec
   §3.3.10) as well as by this package's PSI-MOD origin check. On the repository's test
   files the two rules agree and no output changes; they can differ only for a modification

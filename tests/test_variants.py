@@ -375,7 +375,8 @@ def test_no_peptide_spans_a_nonsense_stop() -> None:
     (PEFF_SpecDoc_1.0_FINAL.pdf, April 5 2019, http://psidev.info/peff)
 
     This holds both before and after the port to pefftacular's apply_variants; it is not
-    what the port changed. See test_stop_variant_truncation_is_an_interpretation.
+    what the port changed. What did change is Ty's chosen reading, held by
+    test_stop_variant_drops_everything_after_the_stop.
     """
     entry = _uniprot_export_p21802()
     peptides = list(digest_peff_sequence(entry, _cfg(cleave_on="KR", min_length=7, max_length=40, missed_cleavages=2)))
@@ -384,15 +385,21 @@ def test_no_peptide_spans_a_nonsense_stop() -> None:
     assert all("*" not in str(p.proforma) for p in peptides)
 
 
-def test_stop_variant_truncation_is_an_interpretation() -> None:
-    """NOT a specification requirement. This pins an interpretation so a change is visible.
+def test_stop_variant_drops_everything_after_the_stop() -> None:
+    """Ty's chosen reading of PEFF 1.0, decided 2026-11-18. Not a requirement of the spec.
 
-    PEFF 1.0 section 3.3.8 requires only that no peptide span the asterisk
-    (test_no_peptide_spans_a_nonsense_stop). It does not say the residues after the stop
-    are absent from that form, and section 3.2's amino acid table glosses "*" as
-    "Sequence interruption (stop codon, unknown linkage)", which reads the other way.
-    Treating the form as truncated before the stop is the reading pefftacular 1.4.1
-    implements and that this package now inherits by calling it.
+    The specification does not settle this. Section 3.3.8 requires only that no peptide
+    span the asterisk - "The asterisk is to be interpreted as a nonsense mutation (stop
+    codon) over which a peptide sequence MUST NOT span" - which
+    test_no_peptide_spans_a_nonsense_stop covers and which 0.3.0 already satisfied. It does
+    not say the residues after the stop are absent from that form, and section 3.2's amino
+    acid table glosses "*" as "Sequence interruption (stop codon, unknown linkage)", which
+    reads the other way. (PEFF_SpecDoc_1.0_FINAL.pdf, April 5 2019,
+    http://psidev.info/peff.)
+
+    Ty chose on 2026-11-18 that a "*" variant drops everything after the stop, which is
+    also what pefftacular 1.4.1's apply_variants does and what this package inherits by
+    calling it. This test holds that decision, so a change to it is visible.
 
     The expected residue is UniProt's: P21802 residue 117 is T, and the form built from
     (118|*) therefore ends in T.
